@@ -35,6 +35,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String[] BLOCKED = {
             "com.xs.fm.live.impl.ecom.mall.NativeMallActivity",
             "com.bytedance.ug.sdk.luckycat.",
+            "com.ss.android.excitingvideo.ExcitingVideoActivity",
             "com.dragon.read.ad.dark.ui.",
             "com.dragon.read.ad.exciting.video.AdBrowserActivity",
             "com.dragon.read.ad.immersive.ImmersiveActivity",
