@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.eta.fanqie.enhance"
+    android:versionCode="19200"
+    android:versionName="1.9.2">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+    <application
+        android:label="番茄畅听净化模块"
+        android:allowBackup="false">
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="番茄畅听净化：会员破解+隐藏商城/领现金/金币入口/广告弹窗" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="82" />
+        <meta-data
+            android:name="xposedscope"
+            android:value="com.xs.fm" />
+    </application>
+</manifest>
