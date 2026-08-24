@@ -181,7 +181,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 v.getLocationOnScreen(loc);
                 View dec = act.getWindow().getDecorView();
                 int sw = dec.getWidth(), sh = dec.getHeight();
-                boolean topRight = loc[1] >= 0 && loc[1] < sh * 0.18f && (loc[0] + v.getWidth()) > sw * 0.5f;
+                boolean topRight = loc[1] >= 0 && loc[1] < sh * 0.18f && ((loc[0] + v.getWidth()) > sw * 0.5f || loc[0] < sw * 0.35f); // 顶部左右角均视为金币入口(阅读页左上角/主页右上角)
                 if (topRight && v.getVisibility() != View.GONE) {
                     v.setVisibility(View.GONE);
                     cnt[0]++;
