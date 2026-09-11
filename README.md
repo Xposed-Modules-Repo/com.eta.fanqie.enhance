@@ -95,37 +95,18 @@
 
 ## 安装步骤
 
-> ✅ **顺序要求已放宽**：v1.9.10 起去广告与界面净化**不再要求先登录**。推荐顺序为「装模块 → 启用作用域 → 强停重启目标 App」，登录与否随意。
+1. 手机已 **Root**，并装好 **LSPosed** 或 **Vector**（两者任选其一）
+2. 安装本模块 APK
+3. 打开 LSPosed / Vector 管理器，**启用本模块**
+4. 在模块的**作用域**里勾选 **番茄畅听**
+5. 强制停止番茄畅听（或重启手机）后重新打开，即可生效
 
-1. **安装模块 APK**
-   ```bash
-   pm install -r /path/to/fanqie-enhance-v1.9.10.apk
-   ```
-2. **在 Vector / LSPosed 管理器中启用模块**，作用域勾选番茄畅听
-   ```
-   /data/adb/lspd/cli modules enable com.eta.fanqie.enhance
-   /data/adb/lspd/cli scope add com.eta.fanqie.enhance com.xs.fm/0
-   ```
-3. **强制停止番茄畅听后重新打开**（模块随目标进程注入，必须重启目标进程才生效）
-   ```bash
-   am force-stop com.xs.fm
-   ```
-4. （可选）登录账号，仅用于获得完整 VIP 免听体验。
-
-### 如何确认模块已生效（⚠️ 日志不在 logcat 里）
-
-`XposedBridge.log` 的输出**不会**出现在 `logcat` 中。Vector/LSPosed 会把它写进自己的日志文件，logcat 里只能看到 `VectorZygiskBridge: GET_BINDER` 这类框架噪声，**不要被它误导**。
-
-```bash
-adb shell "su -c 'grep FanqieEnhance /data/adb/lspd/log/verbose_*.log | tail -20'"
-```
-
-看到 `[FanqieEnhance] v1.9.10 加载: process=com.xs.fm` 与 `已patch userModel: isVip=true freeAd=true leftTime=999999999` 即成功。
+> 不需要登录账号 —— 去广告与界面净化直接生效；想要完整 VIP 免听体验再登录即可。
 
 ### 已知限制
-- 卸载后重装模块需**重新 enable + scope add**
 - **番茄大版本更新可能改变混淆类名 / 资源 id**（如 `h80`），届时需按新版本重新适配
 - 模块只影响 `com.xs.fm` 主进程，不影响其他应用
+- 若重装模块后不生效，在管理器里把模块开关关掉再打开一次即可
 
 ---
 
