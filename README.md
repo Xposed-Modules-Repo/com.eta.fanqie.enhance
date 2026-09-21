@@ -2,21 +2,8 @@
 
 一个 [Vector](https://github.com/AAswordman/Vector) / LSPosed Xposed 模块：净化番茄畅听（com.xs.fm）的使用体验——破解会员、隐藏营销入口与广告弹窗。
 
-> **当前版本：v1.9.20**
-> **适配目标应用：番茄畅听 `6.7.1.32`（versionCode `671`）实测通过**
-> 需要 Root + Vector 或 LSPosed（xposedminversion 82，Android 8.0+）
-
----
-
-## 🔗 项目主页（源码 / 更新 / 问题反馈）
-
-> **👉 [https://github.com/guoxpeng/fanqie-purify](https://github.com/guoxpeng/fanqie-purify)**
-
-**本仓库仅为 LSPosed / Vector 模块仓库的发布镜像，完整源码、最新版本与详细说明请前往上面的主仓库。**
-
-- 📦 **主仓库（源码 + 最新 APK + 完整文档）**：<https://github.com/guoxpeng/fanqie-purify>
-- 🐛 **问题反馈 / 建议**：<https://github.com/guoxpeng/fanqie-purify/issues>
-- ⬇️ **直接下载最新版**：[fanqie-enhance-v1.9.20.apk](https://github.com/guoxpeng/fanqie-purify/raw/main/fanqie-enhance-v1.9.20.apk)
+> **当前版本：v1.9.20** ｜ **适配目标应用：番茄畅听 `6.7.1.32`（versionCode `671`）实测通过**
+> 框架要求：Root + Vector 或 LSPosed（xposedminversion 82，Android 8.0+）
 
 ---
 
