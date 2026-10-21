@@ -437,6 +437,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 || t.contains("可解锁")) return true;
         // v1.9.24：关于页两个广告入口「了解与管理广告推送 / 了解与管理个性化推荐」
         if (t.contains("广告推送") || t.contains("个性化推荐") || t.contains("广告设置")) return true;
+        // v1.9.25：听书页「天天赚金币」营销面板
+        if (t.contains("天天赚金币") || t.contains("时长赚金币") || t.contains("阅读赚金币")) return true;
         // v1.9.6 新增：推广广告类（番茄免费小说/看剧赚钱等穿山甲/优量汇素材）
         if (t.contains("看剧赚钱") || t.contains("赚钱红包") || t.contains("看短剧")
                 || t.contains("免费小说") || t.contains("刷短剧") || t.contains("多人推荐")
@@ -3571,6 +3573,14 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    /** v1.9.25：判断是否金币播报/语音广告音频（服务端下发的 .aac） */
+    private boolean isVoiceAdUrl(String u) {
+        if (u == null) return false;
+        String low = u.toLowerCase();
+        return low.contains("warningtone") || low.contains("/novel-tts/")
+                || low.contains("goldcoin_credited");
+    }
+
     /**
      * v1.9.24：章节结束「语音广告」拦截。
      *
@@ -3621,6 +3631,30 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log("[" + TAG + "] ✅ TTS 播报已静音");
         } catch (Throwable t) {
             XposedBridge.log("[" + TAG + "] TTS 静音挂载失败: " + t);
+        }
+        // v1.9.25：金币播报/语音广告是**服务端下发 .aac**（novel-tts/warningtone_*.aac），
+        // 在 Cronet 请求层直接掐掉下载，比在播放器层拦更彻底。
+        try {
+            Class<?> cronet = XposedHelpers.findClassIfExists("org.chromium.net.CronetEngine", appCl);
+            if (cronet != null) {
+                XposedBridge.hookAllMethods(cronet, "newUrlRequestBuilder", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.args == null || param.args.length == 0) return;
+                            Object a0 = param.args[0];
+                            if (!(a0 instanceof String)) return;
+                            String u = (String) a0;
+                            if (isVoiceAdUrl(u)) {
+                                XposedBridge.log("[" + TAG + "] 🚫 拦截语音广告音频请求: " + u);
+                                param.args[0] = "http://127.0.0.1/fanqie-blocked";
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+                XposedBridge.log("[" + TAG + "] ✅ 语音广告音频请求拦截已启用 (Cronet)");
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[" + TAG + "] Cronet 语音广告拦截失败: " + t);
         }
         try {
             XposedBridge.hookAllMethods(android.media.MediaPlayer.class, "setDataSource", new XC_MethodHook() {

@@ -2,6 +2,17 @@
 
 所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v1.9.25] - 2026-10-22
+
+### 修复（用户反馈：章节结束还有「领取金币」和「畅听时长不足」语音）
+- **在下载层掐断语音广告音频**：抓包定位到语音不是 TTS，而是**服务端下发的 .aac**：
+  `https://lf9-file-sign.fqnovelstatic.com/novel-tts/warningtone_template_95_novelfm_goldcoin_credited_*.aac`
+  这类音频统一走 Cronet 下载。新增 `isVoiceAdUrl()` + Cronet `newUrlRequestBuilder` 拦截，
+  命中 `warningtone` / `/novel-tts/` / `goldcoin_credited` 时把 URL 改写为本地不可达地址，
+  音频根本下载不下来，从源头消除播报。
+- **听书页「天天赚金币」面板隐藏**：`isAdEntryText()` 增加「天天赚金币 / 时长赚金币 / 阅读赚金币」。
+- 保留 v1.9.24 的 `AudioAdManager.interceptStartPlay()` 恒 false 与 TTS 静音作为第二道防线。
+
 ## [v1.9.24] - 2026-10-22
 
 ### 修复（用户反馈：还有浮窗跳出来的双十一广告）
