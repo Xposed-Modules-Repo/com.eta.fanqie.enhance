@@ -2,6 +2,17 @@
 
 所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v1.9.26] - 2026-10-22
+
+### 修复（v1.9.25 的 Cronet 拦截未生效：章节结束仍有「领取金币」语音）
+- **原因**：APK 的 dex 里根本没有 `org.chromium.net.CronetEngine`（Cronet 是运行时动态加载的），
+  所以 v1.9.25 的 Cronet hook 挂载失败，语音照播。
+- **改为播放器入口拦截**：新增 `hookPlayerUrlBlocker()`，同时 hook
+  `com.ss.ttvideoengine.TTVideoEngine.setUrl/setDirectURL/setLocalURL`、
+  `com.ss.ttm.player.MediaPlayer.setDataSource`、`android.media.MediaPlayer.setDataSource`，
+  URL 命中 `warningtone` / `novel-tts` / `goldcoin_credited` 直接拒绝；
+  其它 `.aac`/`tts` 数据源会打日志（`🎵 TTE 数据源:`）便于继续定位。
+
 ## [v1.9.25] - 2026-10-22
 
 ### 修复（用户反馈：章节结束还有「领取金币」和「畅听时长不足」语音）

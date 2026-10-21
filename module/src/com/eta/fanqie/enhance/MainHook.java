@@ -336,6 +336,7 @@ public class MainHook implements IXposedHookLoadPackage {
         hookMainRecommendFloat();        // v1.9.24 新增：首页「推荐悬浮窗/推荐插屏」源头拦截（双11 运营浮窗）
         hookVoiceCastBlocker();          // v1.9.23 新增：屏蔽「金币已到账…」语音播报广告
         hookAudioAdManager();            // v1.9.24 新增：章节结束语音广告（AudioAdManager/TTS）
+        hookPlayerUrlBlocker();          // v1.9.26 新增：播放器数据源兜底（warningtone/novel-tts 音频）
         scheduleAdSignalRetry();
         scheduleMineTreeDump();          // v1.9.21 诊断：抓「我的」页视图树
     }
@@ -3571,6 +3572,88 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /**
+     * v1.9.26：播放器数据源兜底。
+     *
+     * 背景：`novel-tts/warningtone_*.aac` 这类语音在 v1.9.25 的 Cronet 拦截里没被挡住 ——
+     * 实测 APK 里根本没有 `org.chromium.net.CronetEngine`（Cronet 是动态加载的），
+     * 所以改在**播放器入口**按 URL 拦截：
+     *   ① `com.ss.ttvideoengine.TTVideoEngine.setUrl/setDirectURL/setLocalURL`
+     *   ② `com.ss.ttm.player.MediaPlayer.setDataSource(String)`
+     *   ③ `android.media.MediaPlayer.setDataSource(String)`
+     * 命中 `warningtone` / `novel-tts` / `goldcoin_credited` 就不把 URL 交进去。
+     */
+    private void hookPlayerUrlBlocker() {
+        String[] tteMethods = {"setUrl", "setDirectURL", "setLocalURL"};
+        try {
+            Class<?> te = XposedHelpers.findClassIfExists("com.ss.ttvideoengine.TTVideoEngine", appCl);
+            if (te != null) {
+                XC_MethodHook h = new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.args == null || param.args.length == 0) return;
+                            if (!(param.args[0] instanceof String)) return;
+                            String u = (String) param.args[0];
+                            if (isVoiceAdUrl(u)) {
+                                XposedBridge.log("[" + TAG + "] 🚫 拦截语音音频(TTVideoEngine): " + u);
+                                param.setResult(null);
+                            } else if (u.contains(".aac") || u.contains("tts")) {
+                                XposedBridge.log("[" + TAG + "] 🎵 TTE 数据源: " + u);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                };
+                for (String m : tteMethods) {
+                    try {
+                        XposedHelpers.findAndHookMethod(te, m, String.class, h);
+                    } catch (Throwable ignored) {}
+                }
+                XposedBridge.log("[" + TAG + "] ✅ TTVideoEngine 语音音频拦截已启用");
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[" + TAG + "] TTVideoEngine 拦截失败: " + t);
+        }
+        try {
+            Class<?> mp = XposedHelpers.findClassIfExists("com.ss.ttm.player.MediaPlayer", appCl);
+            if (mp != null) {
+                XposedBridge.hookAllMethods(mp, "setDataSource", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.args == null || param.args.length == 0) return;
+                            Object a0 = param.args[0];
+                            if (!(a0 instanceof String)) return;
+                            String u = (String) a0;
+                            if (isVoiceAdUrl(u)) {
+                                XposedBridge.log("[" + TAG + "] 🚫 拦截语音音频(TTM): " + u);
+                                param.setResult(null);
+                            } else if (u.contains(".aac") || u.contains("tts")) {
+                                XposedBridge.log("[" + TAG + "] 🎵 TTM 数据源: " + u);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+                XposedBridge.log("[" + TAG + "] ✅ TTM MediaPlayer 语音音频拦截已启用");
+            }
+        } catch (Throwable ignored) {}
+        // android.media.MediaPlayer：全量记录，命中即拦
+        try {
+            XposedBridge.hookAllMethods(android.media.MediaPlayer.class, "setDataSource", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        if (param.args == null || param.args.length == 0) return;
+                        Object a0 = param.args[0];
+                        if (!(a0 instanceof String)) return;
+                        String u = (String) a0;
+                        if (isVoiceAdUrl(u)) {
+                            XposedBridge.log("[" + TAG + "] 🚫 拦截语音音频(MediaPlayer): " + u);
+                            param.setResult(null);
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            });
+        } catch (Throwable ignored) {}
     }
 
     /** v1.9.25：判断是否金币播报/语音广告音频（服务端下发的 .aac） */
