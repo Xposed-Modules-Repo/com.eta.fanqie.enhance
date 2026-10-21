@@ -2,6 +2,33 @@
 
 所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v1.9.24] - 2026-10-22
+
+### 修复（用户反馈：还有浮窗跳出来的双十一广告）
+- **首页「推荐悬浮窗 / 推荐插屏」源头拦截**：`hookMainRecommendFloat()` —— 逆向 `classes2.dex` 定位到
+  `com.dragon.read.pages.main.p1`（MainDataHelper）的 `f(MainFragmentActivity, MessageType)`，
+  它按 `TOAST_GOLD / TOAST_CASH / TOAST_OPERATION / BOOK_SNAPSHOT` 分发展示运营浮窗与推荐插屏，
+  日志前缀就是 `推荐悬浮窗 --` / `推荐插屏 --`。这类浮窗的文案、落地页全部由服务端下发，
+  本地没有固定关键词可抓，所以在方法入口对上述 4 类消息直接 `setResult(null)` 跳过。
+- **促销文案规则补齐电商大促词**：`PROMO_POPUP_PATTERNS` 增加「双11 / 双十一 / 11.11 / 狂欢 / 预售 /
+  定金 / 尾款 / 满减 / 领券 / 百亿补贴 / 到手价 / 神券 / 限时抢 / 折上折 / 购物车 / 抢购」，
+  覆盖服务端下发、没有固定类名的促销浮层。
+- **章节结束语音广告拦截**：新增 `hookAudioAdManager()` —— 逆向确认听书贴片声广告由
+  `com.dragon.read.reader.speech.ad.AudioAdManager`（含 `kmp.v2` 变体）调度，
+  它在 `onPlayerStart` 里用 `interceptStartPlay()` 让正文“让路”后播广告音频。
+  现在 `interceptStartPlay()` 恒返回 false（不再为广告暂停正文），并静音 TTS 播报、
+  记录 MediaPlayer 的广告/短音频数据源，便于后续继续收紧。
+- **关于页两个广告入口自动隐藏**：`isAdEntryText()` 增加「广告推送 / 个性化推荐 / 广告设置」，
+  覆盖「我的 → 设置 → 关于」里「了解与管理广告推送」「了解与管理个性化推荐」两项
+  （实测 6.7.4：这两项所在整张卡片会被自动隐藏，其它协议/隐私项不受影响）。
+- **悬浮窗兜底改为多点补扫**：`hookFloatingPromoWindows()` 原来只在 `addView` 后 700ms 扫一次，
+  Lynx 异步渲染的浮层经常还没出文案就被放过；改为 700 / 1600 / 3200ms 三次扫描，
+  命中后仍用 `removeViewImmediate` 真正摘窗（避免透明壳继续吃触摸），并在日志里带上 View 类名便于下次定位。
+
+### 说明
+- 本次未改动其它已有拦截逻辑；`p1.f` 只短路上述 4 类文案性推广消息，其它 MessageType 原样放行。
+- 构建：沿用「替换模板 APK 里的 classes.dex + 重新签名」的本地构建链路，产物 `fanqie-enhance-v1.9.24.apk`。
+
 ## [v1.9.23] - 2026-10-05
 
 ### 新增（用户反馈：听一段时间会冒出「XX金币已到账…」语音广告）

@@ -293,6 +293,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private boolean vipPromoHooked = false;
     /** v1.9.22 悬浮窗（WindowManagerGlobal.addView）促销文案兜底是否已挂载 */
     private boolean floatingPromoHooked = false;
+    /** v1.9.24：首页「推荐悬浮窗/推荐插屏」入口拦截是否已挂载 */
+    private boolean mainFloatHooked = false;
     /** v1.9.23 语音播报（金币已到账…）屏蔽是否已挂载 */
     private boolean voiceCastHooked = false;
     /** v1.9.23 已打过日志的语音播报入口（只打一次） */
@@ -311,7 +313,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (!"com.xs.fm".equals(lpparam.packageName)) {
             return;
         }
-        XposedBridge.log("[" + TAG + "] v1.9.23 加载: process=" + lpparam.processName);
+        XposedBridge.log("[" + TAG + "] v1.9.24 加载: process=" + lpparam.processName);
         this.appCl = lpparam.classLoader;
         hookActivityBlocker();
         hookDialogBlocker();
@@ -331,7 +333,9 @@ public class MainHook implements IXposedHookLoadPackage {
         hookReaderAdLineFactory();       // v1.9.18 新增：从源头屏蔽章节末广告入口行（看小视频免30分钟广告等）
         hookVipPromotionPopup();         // v1.9.19 新增：从源头屏蔽首页 VIP 促销全屏弹层
         hookFloatingPromoWindows();      // v1.9.22 新增：非 Dialog 的促销悬浮窗兜底（会员促销弹层）
+        hookMainRecommendFloat();        // v1.9.24 新增：首页「推荐悬浮窗/推荐插屏」源头拦截（双11 运营浮窗）
         hookVoiceCastBlocker();          // v1.9.23 新增：屏蔽「金币已到账…」语音播报广告
+        hookAudioAdManager();            // v1.9.24 新增：章节结束语音广告（AudioAdManager/TTS）
         scheduleAdSignalRetry();
         scheduleMineTreeDump();          // v1.9.21 诊断：抓「我的」页视图树
     }
@@ -431,6 +435,8 @@ public class MainHook implements IXposedHookLoadPackage {
         // 激励视频/解锁类
         if (t.contains("激励视频") || t.contains("观看视频") || t.contains("解锁时长")
                 || t.contains("可解锁")) return true;
+        // v1.9.24：关于页两个广告入口「了解与管理广告推送 / 了解与管理个性化推荐」
+        if (t.contains("广告推送") || t.contains("个性化推荐") || t.contains("广告设置")) return true;
         // v1.9.6 新增：推广广告类（番茄免费小说/看剧赚钱等穿山甲/优量汇素材）
         if (t.contains("看剧赚钱") || t.contains("赚钱红包") || t.contains("看短剧")
                 || t.contains("免费小说") || t.contains("刷短剧") || t.contains("多人推荐")
@@ -3438,6 +3444,11 @@ public class MainHook implements IXposedHookLoadPackage {
             "仅限当前设备", "限时有效", "限时优惠", "限时特惠", "限时秒杀",
             "不自动续费", "随机优惠", "开通7天", "7天会员", "会员特惠",
             "续费立减", "开通享", "会员权益", "首月", "限时福利", "专享价",
+            // v1.9.24：电商大促浮窗（双11/618 等）。这类组合词不会出现在听书/阅读正文里，
+            // 只会出现在运营下发的促销浮层/弹窗上。
+            "双11", "双十一", "11.11", "狂欢", "预售", "定金", "尾款",
+            "满减", "领券", "百亿补贴", "到手价", "神券", "限时抢",
+            "折上折", "购物车", "抢购",
     };
 
     /** 单条文案是否像会员/促销弹层文案（仅用于弹窗内容，不用于页面内入口） */
@@ -3561,6 +3572,140 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * v1.9.24：章节结束「语音广告」拦截。
+     *
+     * 取证：
+     *  - 听书贴片声广告由 `com.dragon.read.reader.speech.ad.AudioAdManager` 调度，
+     *    通过 `interceptStartPlay()` 让正文播放先“让路”，再播广告音频；
+     *  - 另有 TTS 播报型广告。
+     * 处理：
+     *  ① `interceptStartPlay()` 恒返回 false —— 不再为广告暂停正文；
+     *  ② 静音 TTS 并记录文案（正文为真人音频，TTS 只用于播报/广告）；
+     *  ③ 记录 MediaPlayer 的广告/短音频数据源，便于下次定位（不拦截）。
+     * 说明：只做"不让路 + TTS 静音"，不动 AudioPlayManager 状态机，避免正常播放被搞挂。
+     */
+    private void hookAudioAdManager() {
+        for (String cn : new String[]{
+                "com.dragon.read.reader.speech.ad.AudioAdManager",
+                "com.dragon.read.reader.speech.ad.kmp.v2.AudioAdManager"}) {
+            try {
+                Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
+                if (cls == null) continue;
+                XposedHelpers.findAndHookMethod(cls, "interceptStartPlay", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        try { param.setResult(Boolean.FALSE); } catch (Throwable ignored) {}
+                    }
+                });
+                XposedBridge.log("[" + TAG + "] ✅ 语音广告让路已禁用: " + cn);
+            } catch (Throwable t) {
+                XposedBridge.log("[" + TAG + "] 语音广告拦截失败(" + cn + "): " + t);
+            }
+        }
+        try {
+            XC_MethodHook ttsHook = new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        CharSequence cs = (param.args.length > 0 && param.args[0] instanceof CharSequence)
+                                ? (CharSequence) param.args[0] : null;
+                        if (cs != null && cs.length() > 0) {
+                            XposedBridge.log("[" + TAG + "] 🔇 拦截 TTS 播报: " + cs);
+                        }
+                        param.setResult(0);
+                    } catch (Throwable ignored) {}
+                }
+            };
+            XposedHelpers.findAndHookMethod("android.speech.tts.TextToSpeech", appCl, "speak",
+                    CharSequence.class, int.class, android.os.Bundle.class, String.class, ttsHook);
+            XposedHelpers.findAndHookMethod("android.speech.tts.TextToSpeech", appCl, "speak",
+                    CharSequence.class, int.class, java.util.HashMap.class, ttsHook);
+            XposedBridge.log("[" + TAG + "] ✅ TTS 播报已静音");
+        } catch (Throwable t) {
+            XposedBridge.log("[" + TAG + "] TTS 静音挂载失败: " + t);
+        }
+        try {
+            XposedBridge.hookAllMethods(android.media.MediaPlayer.class, "setDataSource", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        if (param.args == null || param.args.length == 0) return;
+                        Object a0 = param.args[0];
+                        if (!(a0 instanceof String)) return;
+                        String u = (String) a0;
+                        String low = u.toLowerCase();
+                        if (low.contains("ad") || low.contains("promo") || low.endsWith(".mp3")
+                                || low.endsWith(".m4a") || low.endsWith(".aac")) {
+                            XposedBridge.log("[" + TAG + "] 🎵 MediaPlayer 数据源: " + u);
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            });
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * v1.9.24：首页「推荐悬浮窗 / 推荐插屏」源头拦截（双11 等运营浮窗）。
+     *
+     * 取证：classes2.dex 的 com.dragon.read.pages.main.p1（MainDataHelper）
+     *   f(MainFragmentActivity, MessageType) 分派 TOAST_GOLD / TOAST_CASH /
+     *   TOAST_OPERATION 与 BOOK_SNAPSHOT，日志前缀「推荐悬浮窗 --」「推荐插屏 --」。
+     *   这就是运营活动浮窗（双11 促销）的入口：文案、落地页 URL 全部由服务端下发，
+     *   本地没有固定关键词可抓，所以必须在入口跳过。
+     * 处理：只短路这 4 类文案性推广消息，其它 MessageType 原样放行。
+     */
+    private void hookMainRecommendFloat() {
+        if (mainFloatHooked) return;
+        mainFloatHooked = true;
+        try {
+            Class<?> cls = XposedHelpers.findClassIfExists("com.dragon.read.pages.main.p1", appCl);
+            if (cls == null) {
+                XposedBridge.log("[" + TAG + "] 首页推荐浮窗: p1 未找到，跳过");
+                return;
+            }
+            XposedBridge.hookAllMethods(cls, "f", new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        Object mt = param.args.length > 1 ? param.args[1] : null;
+                        String name = mt == null ? "" : mt.toString();
+                        if (name.startsWith("TOAST_") || "BOOK_SNAPSHOT".equals(name)) {
+                            param.setResult(null);
+                            XposedBridge.log("[" + TAG + "] 🚫 拦截首页推荐浮窗/插屏: " + name);
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            });
+            XposedBridge.log("[" + TAG + "] ✅ 首页推荐浮窗拦截已启用 (p1.f)");
+        } catch (Throwable t) {
+            XposedBridge.log("[" + TAG + "] 首页推荐浮窗拦截失败: " + t);
+        }
+    }
+
+    /**
+     * v1.9.24：窗口入场后多点扫描并移除促销悬浮窗。
+     * 抽出来是为了在 700/1600/3200ms 三个时间点复用（Lynx 异步渲染）。
+     */
+    private void scanAndRemovePromoWindow(final Object wmgObj, final View root) {
+        try {
+            String hit = findPromoTextIn(root, 0);
+            if (hit == null) return;
+            boolean removed = false;
+            try {
+                java.lang.reflect.Method rm = wmgObj.getClass().getMethod("removeViewImmediate", View.class);
+                rm.setAccessible(true);
+                rm.invoke(wmgObj, root);
+                removed = true;
+            } catch (Throwable t1) {
+                try {
+                    java.lang.reflect.Method rm2 = wmgObj.getClass().getMethod("removeView", View.class);
+                    rm2.setAccessible(true);
+                    rm2.invoke(wmgObj, root);
+                    removed = true;
+                } catch (Throwable ignored) {}
+            }
+            XposedBridge.log("[" + TAG + "] 已" + (removed ? "移除" : "识别到(移除失败)")
+                    + "促销悬浮窗(内容:'" + hit + "', view=" + root.getClass().getName() + ")");
+        } catch (Throwable ignored) {}
+    }
+
+    /**
      * v1.9.22 兜底网：不是所有促销浮层都是 Dialog —— 有些是直接往
      * WindowManagerGlobal 里 addView 的独立窗口（Lynx popup）。
      * 这里在窗口加入时扫描一次，命中促销文案就整窗移除。
@@ -3589,34 +3734,14 @@ public class MainHook implements IXposedHookLoadPackage {
                                 || (ty == android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY);
                         if (!floating) return;
                         final Object wmgObj = param.thisObject;
-                        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-                            @Override public void run() {
-                                try {
-                                    String hit = findPromoTextIn(root, 0);
-                                    if (hit == null) return;
-                                    // 必须真正把窗口摘掉：只设 GONE 的话透明模态窗口还在，
-                                    // 会继续吃掉触摸事件（表现为界面「卡死」）。
-                                    boolean removed = false;
-                                    try {
-                                        java.lang.reflect.Method rm = wmgObj.getClass()
-                                                .getMethod("removeViewImmediate", View.class);
-                                        rm.setAccessible(true);
-                                        rm.invoke(wmgObj, root);
-                                        removed = true;
-                                    } catch (Throwable t1) {
-                                        try {
-                                            java.lang.reflect.Method rm2 = wmgObj.getClass()
-                                                    .getMethod("removeView", View.class);
-                                            rm2.setAccessible(true);
-                                            rm2.invoke(wmgObj, root);
-                                            removed = true;
-                                        } catch (Throwable ignored) {}
-                                    }
-                                    XposedBridge.log("[" + TAG + "] 已" + (removed ? "移除" : "识别到(移除失败)")
-                                            + "促销悬浮窗(内容:'" + hit + "')");
-                                } catch (Throwable ignored) {}
-                            }
-                        }, 700);
+                        // v1.9.24：Lynx 弹层是异步渲染的，700ms 常常还没出文案；改为三点补扫。
+                        for (long delay : new long[]{700L, 1600L, 3200L}) {
+                            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                                @Override public void run() {
+                                    scanAndRemovePromoWindow(wmgObj, root);
+                                }
+                            }, delay);
+                        }
                     } catch (Throwable ignored) {}
                 }
             });
