@@ -23,28 +23,7 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * 番茄畅听增强模块 v1.9.23（适配 6.7.2.32 / versionCode 672）
- * v1.9.23 新增：屏蔽「XX金币已到账…」语音播报广告 —— 逆向 classes13.dex 定位到字节
- *   Polaris（增长/激励体系）语音播报子系统，在播放入口源码级短路：
- *   hookVoiceCastBlocker() → com.bytedance.polaris.impl.voice.w.a|o
- *   + com.bytedance.polaris.impl.audio.AudioHelper.s|r|j（辅助方法 hookVoidMethods
- *   只短路**返回 void** 的重载，boolean/String 这类策略查询一律不碰）。
- *   并修掉一个从 v1.9.7 起就**静默失效**的 hook：silk subwindow 拦截器原来 hook 的是
- *   接口/抽象类 com.bytedance.component.silk.road.subwindow.manager.c 的 e(y70.c)，
- *   没有方法体 → hookAllMethods 抛 "is abstract: it has no body to hook"，
- *   于是这个「页面弹窗广告中央调度」拦截器一直没挂上；改为 hook 具体实现类
- *   ...subwindow.manager.f 与 z70.a。
- * v1.9.22 修复「听书页会员促销弹层漏网」（屏幕上「仅限当前设备开通7天会员，限时有效」整块浮层）：
- *   - 真因：那是服务端下发的 Lynx/自绘促销 Dialog，**整层没有任何 TextView**，
- *     文案只挂在 View 的 content-desc 上（uiautomator 里 desc=[仅限当前设备开通7天会员，限时有效]），
- *     而旧 findBadText 只读 TextView.getText()、且 length<=16 —— 两个条件都不成立。
- *     该文案也不在 APK 里（aapt 只能找到同义的 string/ab0、string/cnx），无法按类名/资源 id 定位。
- *   - 修复：新增 findPromoPopupText()（扫整棵弹窗子树的所有 View 的 content-desc + text）
- *     + PROMO_POPUP_PATTERNS（仅限当前设备/限时有效/不自动续费/开通+会员…）
- *     （护栏**故意不用尺寸**：实测该弹层窗口 decor 是整屏 1080x2400 的透明壳，
- *       真内容只有中间 886x1410，按尺寸判会把弹层当成整页而跳过；改靠文案特异性）
- *     + Dialog.show 后 0/300/800/1600/2800ms 多点扫描（Lynx 异步渲染才会出文案）。
- *   - 另新增 Dialog.show 类名观测日志（去重），换版本后可据此定位新的漏网弹窗类。
+ * 番茄畅听增强模块 v1.9.20（适配 6.7.1.32 / versionCode 671）
  * 基底 = v1.9.5：VIP patch、底部商城/领现金tab隐藏、广告卡整体隐藏、
  *   三级入口隐藏(hideEntry/hideShallow/hideChain)、桌面快捷方式清理、阅读页金币面板、弹窗拦截。
  * 合入 adfix 增强：hookAdSignals 源码级拦截广告SDK调用、更广 BLOCKED 页面前缀。
@@ -89,16 +68,6 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *     audio_patch_ad / audio_info_flow），用户主动触发的激励视频/金币流程一律放行。
  *   - 同时把所有出现过的广告位打一条日志，便于换版本后重新收集黑名单。
  *   - ⚠️ 不能照搬对方类名：NsAdImpl / NsVipImpl 在畅听里不存在（基线版本不同）。
- * v1.9.21 适配 6.7.2.32（versionCode 672）—— 逐项核对后只需改两个混淆类名：
- *   - 资源 id 全部未变：aapt dump resources 对比 671/672，模块用到的 14 个资源名
- *     （gxi/bwf/gtr/abz/abx/a3c/fp_/br7/gtn/dg3/e4q/e4r/ej2/ce4/h80）id 数值逐一相同，
- *     PRE_HIDE_RES_IDS 与 getIdentifier 规则原样可用。
- *   - 阅读页广告行工厂改名：Lf22/q; → Lf32/q;（a/b/c 仍分别构造 AddShortcutLine /
- *     ButtonLine / BuyVipEntranceLine，且仍只被阅读页广告行 provider 调用）
- *   - VIP 促销弹层改名：a13.d0 → i23.d0（super 仍是 com.dragon.read.widget.dialog.i）
- *   - 其余 hook 目标（AdConfigManager.checkAdAvailable / AdLynxHelper.checkIfRitAvailable /
- *     MusicPatchAdContainer.setAdPatchView / FreeAdConversionDialog / AbsQueueBottomSheetDialogFragment /
- *     OneStop 两个策略类 / bridge modules.vip.a.showVipPromotionPopup）逐一反汇编确认存在，签名未变。
  */
 public class MainHook implements IXposedHookLoadPackage {
 
@@ -157,7 +126,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private Field cachedMViewsField = null;           // mViews 字段缓存
     private long lastHideAllTime = 0;                 // hideAll 上次执行时间
     private static final long MIN_HIDE_INTERVAL = 1200; // hideAll 最小间隔 1.2秒，避免卡顿
-
+    private boolean hasListenerAttached = false;      // 防止重复注册 OnGlobalLayout
     private boolean patchAdContainerHooked = false;   // v1.9.9 听歌页贴片视频广告容器 hook 已注册
     private View minePageDecor = null;                // v1.9.20 isMinePage 缓存（同一 decor 只判定一次）
     private boolean minePageFlag = false;
@@ -176,12 +145,13 @@ public class MainHook implements IXposedHookLoadPackage {
             "com.dragon.read.music.player.widget.MusicPatchAdContainer";
 
     /**
-     * v1.9.11 新增、v1.9.12 按 6.7.1.32 重新提取、v1.9.21 按 6.7.2.32 复核：已知广告资源
-     * ID 硬编码集合。
+     * v1.9.11 新增、v1.9.12 按 6.7.1.32 重新提取：已知广告资源 ID 硬编码集合。
      *
-     * 说明：6.7.2.32 与 6.7.1.32 相比，资源 id 数值**没有平移**（aapt dump resources 逐项对比
-     * 确认模块用到的全部资源名 id 完全一致），所以下面这些硬编码整数原样保留。
-     * 提取命令：aapt d resources fanqie_67232.apk | grep -E 'resource 0x[0-9a-f]+ .*id/'
+     * 说明：6.7.1.32 的 versionCode 仍是 671，混淆「名字表」没变（gxi/bwf/gtr/... 这些
+     * 资源名在两版里都存在、模块的 getIdentifier 按名查找逻辑无需改动），但**资源 ID 的
+     * 数值整体平移了**，所以下面这些硬编码整数必须按新版重新提取，否则
+     * ViewGroup.addView 预拦截会对着一批不存在的 id 空转。
+     * 提取命令：aapt d resources fanqie_67132.apk | grep -E 'resource 0x[0-9a-f]+ .*id/'
      * 用于 ViewGroup.addView 时的预拦截，在 View 被添加进树之前就直接 GONE，
      * 彻底消除「首帧闪现」问题（事后 setVisibility/GONE 仍会先渲染一帧）。
      * 这些 ID 从 aapt2 dump resources 获得，只对该版本有效；换版本后需重新提取。
@@ -193,12 +163,7 @@ public class MainHook implements IXposedHookLoadPackage {
             0x7f10062d, // id/abz  阅读页300金币 ImageView
             0x7f10062b, // id/abx  阅读页300金币容器
             0x7f1004c5, // id/a3c  听歌页横幅广告
-            0x7f1022e9, // id/fp_  听歌页卡片广告
-            // v1.9.21 新增：「我的」页四块（按 6.7.2.32 的实机 View 树重新定位）
-            0x7f100df5, // id/bsf  我的页 VIP 促销卡片
-            0x7f101af2, // id/e87  我的资产 + 邀请好友/好友管理板块
-            0x7f101a72, // id/e4q  我的页快捷入口栏（我的消息/优惠券/购物车/商城/游戏中心）
-            0x7f10116c  // id/cfe  上者的外包装容器（只藏 e4q 会留下 1008x238 的空白）
+            0x7f1022e9  // id/fp_  听歌页卡片广告
     ));
 
     /**
@@ -242,7 +207,7 @@ public class MainHook implements IXposedHookLoadPackage {
     ));
 
     /**
-     * v1.9.12 新增：阅读页 Lynx 广告「场景键」黑名单（6.7.2.32 复核，键名未变）。
+     * v1.9.12 新增：阅读页 Lynx 广告「场景键」黑名单（6.7.1.32 实测）。
      *
      * <p>屏幕上的广告：阅读页正文流里插进来的推广卡（图片 + 标题「曲靖恒源家居购物公司」
      * + 描述 + 「反馈」按钮），bounds≈[140,1452][940,1884]。它**不在 View 树里带资源 id**
@@ -291,29 +256,15 @@ public class MainHook implements IXposedHookLoadPackage {
     private boolean readerAdLineHooked = false;
     /** v1.9.19 首页 VIP 促销全屏弹层拦截是否已挂载 */
     private boolean vipPromoHooked = false;
-    /** v1.9.22 悬浮窗（WindowManagerGlobal.addView）促销文案兜底是否已挂载 */
-    private boolean floatingPromoHooked = false;
-    /** v1.9.24：首页「推荐悬浮窗/推荐插屏」入口拦截是否已挂载 */
-    private boolean mainFloatHooked = false;
-    /** v1.9.23 语音播报（金币已到账…）屏蔽是否已挂载 */
-    private boolean voiceCastHooked = false;
-    /** v1.9.23 已打过日志的语音播报入口（只打一次） */
-    private final Set<String> loggedVoiceEntries = new HashSet<>();
     /** v1.9.18 已屏蔽过的广告入口行（只打一次日志） */
     private final Set<String> readerAdLineBlocked = new HashSet<>();
-    /** v1.9.21 已打过「构造即 GONE」日志的广告 View 类（这些 View 会高频重复构造，只打一次） */
-    private final Set<String> loggedCtorClasses = new HashSet<>();
-    /** v1.9.21 已打过「位于顶栏内、跳过隐藏」日志的文案（每 2 秒重复一次，只打一次） */
-    private final Set<String> loggedTopBarSkipped = new HashSet<>();
-    /** v1.9.22 已打过「Dialog.show 观测到类」日志的弹窗类（诊断漏网弹窗用，每个类只打一次） */
-    private final Set<String> loggedDialogClasses = new HashSet<>();
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (!"com.xs.fm".equals(lpparam.packageName)) {
             return;
         }
-        XposedBridge.log("[" + TAG + "] v1.9.24 加载: process=" + lpparam.processName);
+        XposedBridge.log("[" + TAG + "] v1.9.19 加载: process=" + lpparam.processName);
         this.appCl = lpparam.classLoader;
         hookActivityBlocker();
         hookDialogBlocker();
@@ -332,14 +283,7 @@ public class MainHook implements IXposedHookLoadPackage {
         hookOneStopReaderAd();           // v1.9.14 新增：从源头关闭阅读页 OneStop 一站式广告（去空白）
         hookReaderAdLineFactory();       // v1.9.18 新增：从源头屏蔽章节末广告入口行（看小视频免30分钟广告等）
         hookVipPromotionPopup();         // v1.9.19 新增：从源头屏蔽首页 VIP 促销全屏弹层
-        hookFloatingPromoWindows();      // v1.9.22 新增：非 Dialog 的促销悬浮窗兜底（会员促销弹层）
-        hookMainRecommendFloat();        // v1.9.24 新增：首页「推荐悬浮窗/推荐插屏」源头拦截（双11 运营浮窗）
-        hookVoiceCastBlocker();          // v1.9.23 新增：屏蔽「金币已到账…」语音播报广告
-        hookAudioAdManager();            // v1.9.24 新增：章节结束语音广告（AudioAdManager/TTS）
-        hookPlayerUrlBlocker();          // v1.9.26 新增：播放器数据源兜底（warningtone/novel-tts 音频）
-        hookListenTimeGate();            // v1.9.29 新增：畅听时长/全天畅听特权伪装（点听书不再被「时长已用完」拦停）
         scheduleAdSignalRetry();
-        scheduleMineTreeDump();          // v1.9.21 诊断：抓「我的」页视图树
     }
 
     /**
@@ -354,12 +298,8 @@ public class MainHook implements IXposedHookLoadPackage {
                     if (cs == null) return;
                     String t = cs.toString().trim();
                     if (t.length() == 0) return;
-                    // v1.9.21：「深度卸载」这类短广告文案只有 4 个字，旧的 14 字门卡直接把它挡在外面。
-                    // 改为先用 isLongAdText 判定（它内部按关键词/数字模式，不按长度），
-                    // 只有「长文案」才需要那个 14 字护栏来避免误伤阅读页正文。
-                    boolean sus = isLongAdText(t);
-                    if (t.length() > 14 && !isMinePageAdText(t) && !sus) return; // 放行正文长文案
-                    if (isAdEntryText(t) || isMinePageAdText(t) || sus) {
+                    if (t.length() > 14 && !isMinePageAdText(t)) return; // 放行我的页长文案
+                    if (isAdEntryText(t) || isMinePageAdText(t)) {
                         hideAdEntryView((View) param.thisObject, t);
                     }
                 } catch (Throwable ignored) {}
@@ -377,9 +317,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         if (cs == null) return;
                         String t = cs.toString().trim();
                         if (t.length() == 0) return;
-                        boolean sus = isLongAdText(t);
-                        if (t.length() > 14 && !isMinePageAdText(t) && !sus) return;
-                        if (isAdEntryText(t) || isMinePageAdText(t) || sus) {
+                        if (t.length() > 14 && !isMinePageAdText(t)) return;
+                        if (isAdEntryText(t) || isMinePageAdText(t)) {
                             hideAdEntryView((View) param.thisObject, t);
                         }
                     } catch (Throwable ignored) {}
@@ -387,34 +326,6 @@ public class MainHook implements IXposedHookLoadPackage {
             });
         } catch (Throwable ignored) {}
         XposedBridge.log("[" + TAG + "] TextView.set 广告文本过滤器已启用");
-    }
-
-    /**
-     * v1.9.21 新增：偏长的广告文案（全屏广告 / 清理加速类弹窗），最长 30 字。
-     *
-     * 这些文案超过了短规则 14 字的限制（如「今天最多可以赚3688金币」「深度卸载」
-     * 「手机内存不足卡顿」类的假清理/加速广告），之前全部漏过。
-     * 为了不误伤阅读页正文，命中条件刻意写得很紧：
-     *   ① 清理/加速类关键词（小说正文几乎不可能出现）；
-     *   ② 「赚 + 金币」必须同时带数字（「今天最多可以赚3688金币」），避开正文里的普通句子。
-     */
-    private boolean isLongAdText(String t) {
-        if (t == null || t.length() > 30) return false;
-        // ① 假清理 / 加速 / 卸载类。这些词在小说正文里几乎不可能出现，
-        //    所以这里不做长度限制 —— 「深度卸载」只有 4 个字，之前被 14 字的门卡拦在外面。
-        if (t.contains("深度卸载") || t.contains("内存不足") || t.contains("手机卡顿")
-                || t.contains("一键清理") || t.contains("立即清理") || t.contains("垃圾清理")
-                || t.contains("手机发热") || t.contains("手机耗电") || t.contains("清理垃圾")
-                || t.contains("深度清理") || t.contains("一键加速") || t.contains("立即加速")
-                || t.contains("手机加速") || t.contains("手机降温") || t.contains("清理大师")) return true;
-        // 注意：故意不写「手机内存 / 运行内存 / 释放内存」这种四个字的泛词 ——
-        //      它们有可能正好是书名/章节名，误伤成本大于收益；真正的广告文案是
-        //      「手机内存不足卡顿」，已经被上面的「内存不足」覆盖了。
-        // ② 「赚 + 金币」必须同时带数字（「今天最多可以赚3688金币」），避开正文里的普通句子
-        if (t.contains("赚") && t.contains("金币") && t.matches(".*\\d.*")) return true;
-        // ③ 「卸载」必须搭配广告/金币/红包，否则可能是正常的「卸载应用」
-        if (t.contains("卸载") && (t.contains("广告") || t.contains("金币") || t.contains("红包"))) return true;
-        return false;
     }
 
     /** 广告入口文本关键词（精确匹配，防误伤正文） */
@@ -437,10 +348,6 @@ public class MainHook implements IXposedHookLoadPackage {
         // 激励视频/解锁类
         if (t.contains("激励视频") || t.contains("观看视频") || t.contains("解锁时长")
                 || t.contains("可解锁")) return true;
-        // v1.9.24：关于页两个广告入口「了解与管理广告推送 / 了解与管理个性化推荐」
-        if (t.contains("广告推送") || t.contains("个性化推荐") || t.contains("广告设置")) return true;
-        // v1.9.25：听书页「天天赚金币」营销面板
-        if (t.contains("天天赚金币") || t.contains("时长赚金币") || t.contains("阅读赚金币")) return true;
         // v1.9.6 新增：推广广告类（番茄免费小说/看剧赚钱等穿山甲/优量汇素材）
         if (t.contains("看剧赚钱") || t.contains("赚钱红包") || t.contains("看短剧")
                 || t.contains("免费小说") || t.contains("刷短剧") || t.contains("多人推荐")
@@ -451,15 +358,10 @@ public class MainHook implements IXposedHookLoadPackage {
     /** "我的"页面广告/资产入口关键词（允许长文案，覆盖 VIP 横幅） */
     private boolean isMinePageAdText(String t) {
         if (t == null) return false;
-        // 增强：检测更广泛的权益/时长相关文案，防止漏网
         if (t.contains("尊享免广告") || t.contains("无限下载") || t.contains("多种权益")) return true;
         if (t.contains("¥14开通") || t.contains("VIP")) return true;
-        // 增强检测：剩余时长、播放时长、畅听状态相关文案
-        if (t.contains("剩余时长") || t.contains("播放时长") || t.contains("畅听")
-                || t.contains("时长已用") || t.contains("时长过期")
-                || t.contains("继续畅听") || t.contains("时长剩余")) return true;
         if (t.contains("我的资产") || t.contains("金币余额") || t.contains("现金余额")
-                || t.contains("提现")) return true;
+                || t.contains("剩余时长") || t.contains("提现")) return true;
         return false;
     }
 
@@ -557,126 +459,44 @@ public class MainHook implements IXposedHookLoadPackage {
         }, 10);
     }
 
-    /**
-     * v1.9.21：桌面快捷方式（长按 App 图标弹出的菜单）广告关键词。
-     *
-     * 「今天最多可以赚3688金币 / 深度卸载 / 手机内存不足卡顿」这三个广告入口**根本不在 APK 里**
-     * —— resources.arsc 和全部 15 个 dex 都 grep 不到，是服务端下发、由 ShortcutManager
-     * 动态发布出来的。因此只能按关键词在「发布的那一瞬间」过滤掉：
-     *   storageId   -> 「手机内存不足卡顿」
-     *   uninstallId -> 「深度卸载」
-     *   totalCoinId -> 「今天最多可以赚3688金币」
-     * 实测 App 每次启动都会重新发布这三个，所以既拦发布（hookShortcutCleaner），
-     * 也在 onResume 时清理一次（removeAdShortcuts）作为兜底。
-     */
-    private static final String[] AD_SHORTCUT_BAD = {
-            "金币", "领现金", "畅听", "福利", "领取", "赚钱", "卸载", "存储",
-            "领红包", "清理", "内存", "卡顿", "加速", "红包", "签到", "任务", "免费",
-            "现金", "提现", "宝箱", "翻倍", "抽奖", "免单", "赚钱",
-    };
-
-    /** 已过滤掉的快捷方式 id（用于日志去重：App 每次启动都重新发布，不然会刷屏） */
-    private final Set<String> filteredShortcutIds = new HashSet<>();
-
-    /**
-     * 过滤一组 ShortcutInfo：命中广告关键词的丢弃，其余保留。
-     *
-     * @return null 表示「不是快捷方式列表」或「一条都不需要过滤」——调用方应保持原参数不动。
-     */
-    private java.util.List<Object> filterShortcutList(Object arg) {
-        if (!(arg instanceof java.util.List)) return null;
-        java.util.List<?> list = (java.util.List<?>) arg;
-        if (list.isEmpty()) return null;
-        java.util.ArrayList<Object> keep = new java.util.ArrayList<>();
-        java.util.ArrayList<String> removedIds = new java.util.ArrayList<>();
-        for (Object o : list) {
-            if (o == null) continue;
-            if (isAdShortcut(o)) removedIds.add(str(o, "getId"));
-            else keep.add(o);
-        }
-        if (removedIds.isEmpty()) return null;
-        if (filteredShortcutIds.addAll(removedIds)) {
-            XposedBridge.log("[" + TAG + "] 已过滤桌面快捷方式(长按图标广告) " + removedIds
-                    + " 保留 " + keep.size() + " 个");
-        }
-        return keep;
-    }
-
-    /**
-     * 该快捷方式是否是广告入口 —— 按 id / 短标题 / 长标题里的关键词判定。
-     *
-     * 中文关键词覆盖服务端下发的文案（「深度卸载」「手机内存不足卡顿」「今天最多可以赚3688金币」…）；
-     * 英文关键词兜底覆盖 id（storageId / uninstallId / totalCoinId 这些 id 里没有中文）。
-     */
-    private boolean isAdShortcut(Object o) {
-        if (o == null) return false;
-        String all = (str(o, "getId") + " " + str(o, "getShortLabel") + " " + str(o, "getLongLabel"))
-                .toLowerCase();
-        if (all.trim().isEmpty()) return false;
-        for (String b : AD_SHORTCUT_BAD) {
-            if (all.contains(b.toLowerCase())) return true;
-        }
-        return all.contains("uninstall") || all.contains("storage") || all.contains("clean")
-                || all.contains("coin") || all.contains("gold") || all.contains("cash")
-                || all.contains("redpacket") || all.contains("reward") || all.contains("bonus");
-    }
-
-    /** 反射调用无参 getter，失败返回空串。 */
-    private String str(Object o, String method) {
-        try {
-            Object r = o.getClass().getMethod(method).invoke(o);
-            return r == null ? "" : r.toString();
-        } catch (Throwable ignored) {
-            return "";
-        }
-    }
-
     private void hookShortcutCleaner() {
         try {
-            final XC_MethodHook h = new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    try {
-                        boolean sawList = false;
-                        for (int i = 0; i < param.args.length; i++) {
-                            java.util.List<Object> keep = filterShortcutList(param.args[i]);
-                            if (keep != null) param.args[i] = keep;
-                            if (param.args[i] instanceof java.util.List) sawList = true;
-                        }
-                        // 单条推送（pushDynamicShortcut(ShortcutInfo)）没有列表可过滤，
-                        // 命中广告就直接跳过整个调用（Xposed 的 setResult 会中止原方法）。
-                        if (!sawList && param.args.length > 0) {
-                            Object last = param.args[param.args.length - 1];
-                            if (isAdShortcut(last)) {
-                                String id = str(last, "getId");
-                                if (filteredShortcutIds.add(id)) {
-                                    XposedBridge.log("[" + TAG + "] 已拦截单条桌面快捷方式广告: " + id);
-                                }
-                                param.setResult(null);
+            final String[] BAD = {"金币", "领现金", "畅听", "福利", "领取", "赚钱", "卸载", "存储", "领红包"};
+            XC_MethodHook h = new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    Object arg = param.args[0];
+                    if (!(arg instanceof java.util.List)) return;
+                    java.util.List<?> list = (java.util.List<?>) arg;
+                    java.util.ArrayList<Object> keep = new java.util.ArrayList<>();
+                    int removed = 0;
+                    for (Object o : list) {
+                        boolean bad = false;
+                        try {
+                            String id = (String) o.getClass().getMethod("getId").invoke(o);
+                            CharSequence label = (CharSequence) o.getClass().getMethod("getShortLabel").invoke(o);
+                            String all = (id + " " + label).toLowerCase();
+                            for (String b : BAD) {
+                                if (all.contains(b.toLowerCase())) { bad = true; break; }
                             }
-                        }
-                    } catch (Throwable ignored) {}
+                        } catch (Throwable ignored) {}
+                        if (bad) removed++; else keep.add(o);
+                    }
+                    if (removed > 0) {
+                        param.args[0] = keep;
+                        XposedBridge.log("[" + TAG + "] 已过滤桌面快捷方式 " + removed + " 个(领金币等广告入口)");
+                    }
                 }
             };
-            // ⚠️ v1.9.21 重要修复：ShortcutManager 在 **android.content.pm** 包下，
-            //    以前写成 android.app.ShortcutManager —— 那个类根本不存在，于是每次启动都打
-            //    「hookShortcutCleaner 失败: ShortcutManager 不可用」，长按图标的广告一条都没拦住，
-            //    只剩 onResume 里的 removeAdShortcuts 事后补救（滞后、且会跟 App 反复拉锯）。
-            int mounted = 0;
-            for (String cn : new String[]{
-                    "android.content.pm.ShortcutManager",
-                    "androidx.core.content.pm.ShortcutManagerCompat"}) {
-                Class<?> c = null;
-                try { c = Class.forName(cn); } catch (Throwable t1) {}
-                if (c == null) { try { c = XposedHelpers.findClassIfExists(cn, appCl); } catch (Throwable t2) {} }
-                if (c == null) continue;
-                XposedBridge.hookAllMethods(c, "addDynamicShortcuts", h);
-                XposedBridge.hookAllMethods(c, "setDynamicShortcuts", h);
-                XposedBridge.hookAllMethods(c, "updateShortcuts", h);
-                XposedBridge.hookAllMethods(c, "pushDynamicShortcut", h);
-                XposedBridge.log("[" + TAG + "] 桌面快捷方式过滤器已启用: " + cn);
-                mounted++;
-            }
-            if (mounted == 0) throw new RuntimeException("ShortcutManager 不可用");
+            Class<?> sm = null;
+            try { sm = XposedHelpers.findClass("android.app.ShortcutManager", ClassLoader.getSystemClassLoader()); } catch (Throwable t1) {}
+            if (sm == null) { try { sm = Class.forName("android.app.ShortcutManager"); } catch (Throwable t2) {} }
+            if (sm == null) throw new RuntimeException("ShortcutManager 不可用");
+            XposedBridge.hookAllMethods(sm, "addDynamicShortcuts", h);
+            XposedBridge.hookAllMethods(sm, "setDynamicShortcuts", h);
+            XposedBridge.hookAllMethods(sm, "updateShortcuts", h);
+            XposedBridge.hookAllMethods(sm, "pushDynamicShortcut", h);
+            XposedBridge.log("[" + TAG + "] 桌面快捷方式过滤器已启用");
         } catch (Throwable t) {
             XposedBridge.log("[" + TAG + "] hookShortcutCleaner 失败: " + t);
         }
@@ -734,17 +554,10 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (a != null && !a.isFinishing()) { try { hideAll(a); } catch (Throwable ignored) {} }
             }
         }, 150);
-        // OnGlobalLayout 驱动（免轮询）：
-        // ⚠️ v1.9.21 重要修复：以前用 hasListenerAttached 布尔量「只挂一次」，
-        //    结果第一个 onResume 的 Activity 是 SplashActivity —— listener 挂在开屏页的 decor 上，
-        //    开屏页一 finish，WeakReference 就变 null，此后 hideAll 再也不会被布局事件驱动。
-        //    而底部四个 Tab（首页/听书/我的…）是同一个 Activity 里的兄弟容器，
-        //    切 Tab 不触发 onResume、也不会重新 post 那一次 150ms 的 hideAll ——
-        //    「我的」页就是这样漏掉的（用户看到“我的页没效果”）。
-        //    现在改成按 decor 逐个挂（WeakHashMap 去重，同一个 decor 不会重复挂）。
-        try {
-            final View decor = act.getWindow().getDecorView();
-            if (!listenedDecors.containsKey(decor)) {
+        // 仅在首次注册 OnGlobalLayout；后续布局变化由 listener 驱动，不再轮询
+        if (!hasListenerAttached) {
+            try {
+                final View decor = act.getWindow().getDecorView();
                 final WeakReference<Activity> ref = new WeakReference<>(act);
                 decor.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
                     private long last = 0;
@@ -758,63 +571,9 @@ public class MainHook implements IXposedHookLoadPackage {
                         hideAll(a);
                     }
                 });
-                listenedDecors.put(decor, Boolean.TRUE);
-            }
-        } catch (Throwable ignored) {}
-        startHideWatchdog(h);
-    }
-
-    /** 已挂过 OnGlobalLayoutListener 的 decor（WeakHashMap：Activity 销毁后自动回收，不会泄漏）。 */
-    private final java.util.WeakHashMap<View, Boolean> listenedDecors = new java.util.WeakHashMap<>();
-    /** v1.9.21 兜底看门狗是否已在跑 */
-    private boolean watchdogRunning = false;
-    /** 上次 hideAll 看到的 decor（用来在切 Tab 后强制重扫一次） */
-    private View lastWatchdogDecor = null;
-
-    /**
-     * v1.9.21 新增：兜底看门狗。
-     *
-     * OnGlobalLayout 只在「布局真的变了」时才触发，而番茄的底部 Tab 切换、服务端下发的新广告块
-     * 有时不产生布局事件。这个看门狗在每次 onResume 后跑 40 秒（每 1.5 秒一次，内部还有
-     * 1.2 秒限频），保证「切到我的页 → 还没刷干净」这种情况能自愈；
-     * 40 秒后自动停下，不会长期占 CPU。每次 onResume 会重新启动它。
-     */
-    private void startHideWatchdog(final Handler h) {
-        if (watchdogRunning) return;
-        watchdogRunning = true;
-        h.postDelayed(new Runnable() {
-            int rounds = 0;
-            @Override public void run() {
-                try {
-                    if (++rounds > 20) { watchdogRunning = false; return; }
-                    Activity a = getForegroundActivity();
-                    if (a == null || a.isFinishing() || a.isDestroyed()) { watchdogRunning = false; return; }
-                    View decor = null;
-                    try { decor = a.getWindow().getDecorView(); } catch (Throwable ignored) {}
-                    if (decor != null && decor != lastWatchdogDecor) {
-                        // 换了页面（decor 变了）→ 重置限频，立刻扫一次
-                        lastHideAllTime = 0;
-                        lastWatchdogDecor = decor;
-                    }
-                    try { hideAll(a); } catch (Throwable ignored) {}
-                } catch (Throwable ignored) {}
-                h.postDelayed(this, 2000);
-            }
-        }, 2000);
-    }
-
-    /** 找当前真的在前台的 Activity（优先「有窗口焦点」的那个，拿不到就退回第一个存活的）。 */
-    private Activity getForegroundActivity() {
-        Activity fallback = null;
-        try {
-            for (Activity a : getAllActivities()) {
-                try {
-                    if (a.hasWindowFocus()) return a;
-                    if (fallback == null) fallback = a;
-                } catch (Throwable ignored) {}
-            }
-        } catch (Throwable ignored) {}
-        return fallback;
+                hasListenerAttached = true;
+            } catch (Throwable ignored) {}
+        }
     }
 
     private int hideAll(Activity act) {
@@ -903,32 +662,27 @@ public class MainHook implements IXposedHookLoadPackage {
      * 所以这里只能走资源 ID 路径。
      */
     private void registerForceHideIds(Activity act) {
-        if (act == null) return;
+        if (cachedHideIds != null || act == null) return;
         try {
-            // v1.9.21：6.7.2.32 又换了一轮 —— 6.7.1.32 用的 br7/gtn/dg3/ej2/ce4 在这一版的
-            //          「我的」页里**一个都不存在**了（实测把整棵 View 树 dump 出来核对过），
-            //          getIdentifier 返回 0 或 findViewById 找不到 → 等于空转。
-            //          下面这组是按 6.7.2.32 的实机 View 树重新定位的：
+            // v1.9.20：6.7.1.32 的「我的」页布局换了资源名 —— 旧的 bpz/e33/ccv/gzy/gr0 在本版
+            //          已不存在（getIdentifier 返回 0，等于空转），必须换成下面这组新名，
+            //          否则 VIP 促销卡与「我的资产」板块会照常显示。
             String[] names = {
-                    "bsf",  // 我的页 VIP 促销卡片（整卡 ConstraintLayout：立减/尊享免广告/立即开通）
-                    "e87",  // 我的资产 + 邀请好友/好友管理 板块（整块 LinearLayout）
-                    "e4q",  // 快捷入口栏（我的消息/优惠券/购物车/商城/游戏中心）
+                    "br7",  // 我的页 VIP 促销卡片（外层 ViewGroup 容器）
+                    "gtn",  // VIP 卡「¥1开通」按钮
+                    "dg3",  // VIP 卡「立减」文案
+                    "e4q",  // 我的资产板块（含 提现/金币余额/现金余额/剩余时长）
+                    "ej2",  // 我的页活动横幅（「中秋好礼限时购」等纯图片促销位，只能按 id 删）
             };
-            // 注意：这里用「合并」而不是「覆盖」——  hideMineGenericBlocks 也会往同一个集合里加 id，
-            // 不能把它的成果冲掉。
-            Set<Integer> ids = cachedHideIds;
-            if (ids == null) {
-                ids = new HashSet<>();
-                cachedHideIds = ids;
-            }
-            int before = ids.size();
+            Set<Integer> ids = new HashSet<>();
             for (String n : names) {
                 try {
                     int id = act.getResources().getIdentifier(n, "id", act.getPackageName());
                     if (id > 0) ids.add(id);
                 } catch (Throwable ignored) {}
             }
-            if (ids.size() != before) {
+            if (!ids.isEmpty()) {
+                cachedHideIds = ids;
                 XposedBridge.log("[" + TAG + "] 已登记强制隐藏资源ID " + ids.size() + " 个: " + ids);
             }
         } catch (Throwable ignored) {}
@@ -950,156 +704,18 @@ public class MainHook implements IXposedHookLoadPackage {
         // --- 听歌页已知广告位 ---
         hideByResId(act, "a3c", cnt, "听歌页横幅广告");
         hideByResId(act, "fp_", cnt, "听歌页卡片广告");
-        // --- "我的"页面：VIP 促销卡 / 我的资产板块 / 快捷入口栏（v1.9.21 按 6.7.2.32 重新定位） ---
+        // --- "我的"页面：VIP 促销卡 / 我的资产板块 / 快捷入口栏（v1.9.20 按 6.7.1.32 重新定位） ---
         // ⚠️ v1.9.9 重要修复：这里**只能直接隐藏卡片容器本身，禁止向上多级隐藏**。
         //    原实现用 hideByResIdUp("gzy", 3) / ("gjj", 4) 向上找父容器，实测会一路
         //    打到 #e10 和 #c1(com.dragon.read.widget.behavior.CommonCustomAppBarLayout)
         //    —— 那是"我的"页整个顶部 AppBar（头像/昵称/个人主页入口/我的消息 全在里面），
         //    结果整个头部被 GONE：页面顶部出现大片空白、下面的菜单/列表位置明显错乱。
-        // 6.7.2.32 实测 View 树（c1 CommonCustomAppBarLayout > e63 LinearLayout）：
-        //   hbj 头像/昵称行 → 保留
-        //   bsf VIP 促销卡（1008x210，含「立减」「尊享免广告…」「立即开通」）
-        //   cfe > e4q 快捷入口栏（1008x238，含 我的消息/优惠券/购物车/商城/游戏中心）
-        //   e87 我的资产（提现/金币余额/现金余额/剩余时长）+ 邀请好友/好友管理（1008x473）
-        // 三者任意一个不藏，屏幕顶部就会留着卡片或大片空白。
-        // ⚠️ 必须用 hideMineResIdCollapse（而不是 hideByResId）：
-        //    e4q 外面还套着 cfe > cfd 两层只负责圆角/滚动/左右箭头的包装容器，
-        //    只 GONE 最里面那层，外面仍占着 1008x238 的布局高度 → 屏幕上就是一块空白。
-        hideMineResIdCollapse(act, "bsf", cnt, "我的页VIP促销卡片");     // VIP 促销卡容器（6.7.2.32）
-        hideMineResIdCollapse(act, "e4q", cnt, "我的页快捷入口栏");       // 我的消息/优惠券/购物车/商城/游戏中心（6.7.2.32）
-        hideMineResIdCollapse(act, "cfe", cnt, "快捷入口栏外包装");       // e4q 的外层包装（去空白的关键）
-        hideMineResIdCollapse(act, "e87", cnt, "我的资产+邀请好友板块");   // 我的资产 / 邀请好友 / 好友管理（6.7.2.32）
-        // 下面两个是 6.7.1.32 的旧 id，6.7.2.32 已不存在（找不到就自动跳过，保留无害）
-        hideByResId(act, "br7", cnt, "我的页VIP促销卡片(旧)");
-        hideByResId(act, "ej2", cnt, "我的页活动横幅(旧)");
+        hideByResId(act, "br7", cnt, "我的页VIP促销卡片");          // VIP 促销卡容器（6.7.1.32）
+        hideByResId(act, "e4q", cnt, "我的资产板块");                // 我的资产板块容器（提现/金币/现金/剩余时长）
+        // 我的页活动横幅（ej2）：内容是服务端下发的**纯图片**（实测为「中秋好礼限时购 一件立减15%>」），
+        // 图片里带字、节点上没有 text/desc，所以文本规则永远抓不到，只能按容器 id 正面屏蔽。
+        hideByResId(act, "ej2", cnt, "我的页活动横幅");
         hideMineEntryCard(act, cnt);                                 // 我的页头部入口卡片（我的消息/游戏中心/活动横幅）
-        hideMineGenericBlocks(act, cnt);                             // v1.9.21：版本无关、按文案定位整块隐藏
-        hideExtraRows(act, cnt);                                     // v1.9.21：设置页等零散条目（支付管理/免流量服务）
-        dumpMineTreeOnce(act);                                       // v1.9.21 诊断：转储当前页 View 树（开关文件控制）
-    }
-
-    /**
-     * v1.9.21：另外要收掉的零散条目 —— 它们不在「我的」页顶部块里，而是设置页列表里的一行。
-     *
-     * 用户指定：「设置 → 支付管理 / 免流量服务」两项要隐藏。
-     * 同样不写资源 id（那两项在本版的 id 是 fis / fjc，下一版又会变），
-     * 只认文案 + 「整行容器」的结构。
-     */
-    private static final String[] EXTRA_HIDE_ROW_TEXTS = {
-            "支付管理", "免流量服务",
-    };
-
-    private long lastExtraRowTime = 0;
-
-    /**
-     * v1.9.21：【版本无关】按文案隐藏「列表里的一整行」。
-     *
-     * 做法：找到文案 → 向上取最近一层「宽度≥ 75% 屏宽、高度≤ 12% 屏高」的容器（就是那一行），
-     * 整行 GONE（子项全没、行高也随之消失，不会留空白），并把行 id 登记进强制隐藏集合。
-     */
-    private void hideExtraRows(Activity act, int[] cnt) {
-        if (act == null) return;
-        try {
-            long now = System.currentTimeMillis();
-            if (now - lastExtraRowTime < 2500) return;      // 限频，别每次布局事件都全页找一遍
-            lastExtraRowTime = now;
-            View decor = act.getWindow().getDecorView();
-            View root = decor.getRootView() != null ? decor.getRootView() : decor;
-            int sw = root.getWidth(), sh = root.getHeight();
-            if (sw <= 0 || sh <= 0) return;
-            for (String t : EXTRA_HIDE_ROW_TEXTS) {
-                View tv = findTextViewByText(decor, t, 0);
-                if (tv == null) continue;
-                View row = findListRow(tv, sw, sh);
-                if (row == null || row == tv) continue;
-                if (row.getVisibility() == View.GONE) continue;
-                row.setVisibility(View.GONE);
-                if (row.getId() != View.NO_ID) addForceHideId(row.getId());
-                cnt[0]++;
-                XposedBridge.log("[" + TAG + "] 已隐藏列表行['" + t + "'] "
-                        + row.getClass().getName() + " w=" + row.getWidth() + " h=" + row.getHeight());
-            }
-        } catch (Throwable ignored) {}
-    }
-
-    /** 从文案节点向上找「整行」容器：宽度≥ 75% 屏宽且高度≤ 12% 屏高。 */
-    private View findListRow(View tv, int sw, int sh) {
-        View cur = tv;
-        for (int i = 0; i < 5 && cur != null; i++) {
-            int w = cur.getWidth(), h = cur.getHeight();
-            if (w >= sw * 0.75f && h > 0 && h <= sh * 0.12f) return cur;
-            cur = cur.getParent() instanceof View ? (View) cur.getParent() : null;
-        }
-        return null;
-    }
-
-    /**
-     * v1.9.21 新增：【去空白】按资源名隐藏「我的」页区块，并把外面那层空壳一起折叠。
-     *
-     * 与 hideByResId 的唯一差别就是最后多调一次 {@link #collapseEmptyAncestors}。
-     */
-    private void hideMineResIdCollapse(Activity act, String resName, int[] cnt, String desc) {
-        try {
-            int resId = act.getResources().getIdentifier(resName, "id", act.getPackageName());
-            if (resId <= 0) return;
-            View target = act.getWindow().getDecorView().findViewById(resId);
-            if (target == null) return;
-            if (target.getVisibility() != View.GONE) {
-                target.setVisibility(View.GONE);
-                cnt[0]++;
-                XposedBridge.log("[" + TAG + "] 已隐藏" + desc + "(id=" + resName + ") "
-                        + target.getClass().getName() + " w=" + target.getWidth() + " h=" + target.getHeight());
-            }
-            collapseEmptyAncestors(target, cnt);
-        } catch (Throwable ignored) {}
-    }
-
-    /**
-     * v1.9.21 新增：【版本无关·去空白】自下而上折叠「已经没有可见内容」的外层容器。
-     *
-     * 番茄的卡片外面通常还套着一两层只负责圆角/背景/横向滚动/左右箭头的包装容器
-     * （6.7.2.32 的快捷入口栏就是 cfe > cfd > e4q 三层）。只把最里面那层 GONE，
-     * 外面那层依然占着 1008x238 的布局高度 —— 屏幕上就是一块空白，
-     * 正是本次用户反馈的「没效果、还留空白区域」。
-     *
-     * 做法：从刚隐藏的节点：往上走，只要父容器已经没有任何可见且占位的内容就一起 GONE，
-     * 直到遇到页面外壳（头像行 / 顶部标签栏）为止，绝不越过。
-     */
-    private void collapseEmptyAncestors(View v, int[] cnt) {
-        if (v == null) return;
-        try {
-            View cur = v;
-            for (int i = 0; i < 6; i++) {
-                View p = cur.getParent() instanceof View ? (View) cur.getParent() : null;
-                if (p == null) break;
-                if (mineChromePresent(p)) break;      // 已到页面外壳（头像行 / 标签栏）
-                if (p.getVisibility() == View.GONE) break;
-                if (hasVisibleContent(p, 0)) break;   // 父容器还有别的可见内容，保留
-                p.setVisibility(View.GONE);
-                if (p.getId() != View.NO_ID) addForceHideId(p.getId());
-                cnt[0]++;
-                XposedBridge.log("[" + TAG + "] 已折叠空壳容器(去空白): "
-                        + p.getClass().getName() + " h=" + p.getHeight());
-                cur = p;
-            }
-        } catch (Throwable ignored) {}
-    }
-
-    /**
-     * 容器内是否还有「可见且占位」的内容：GONE / INVISIBLE / 宽高为 0 一律算空。
-     *
-     * 只用于 {@link #collapseEmptyAncestors} 的判断 —— 宁可不折叠，也不要多折叠，
-     * 所以只要找到一个可见且有尺寸的叶子就返回 true。
-     */
-    private boolean hasVisibleContent(View v, int depth) {
-        if (v == null || depth > 12) return false;
-        if (v.getVisibility() != View.VISIBLE) return false;
-        if (!(v instanceof ViewGroup)) return v.getWidth() > 0 && v.getHeight() > 0;
-        ViewGroup g = (ViewGroup) v;
-        for (int i = 0; i < g.getChildCount(); i++) {
-            if (hasVisibleContent(g.getChildAt(i), depth + 1)) return true;
-        }
-        return false;
     }
 
     /**
@@ -1131,395 +747,6 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * v1.9.21 诊断：一次性打印「我的」页顶部视图树（类名#资源名 可见性 尺寸 坐标）。
-     *
-     * 换版本适配时唯一可靠的定位手段 —— 「我的」页一直被 App 自己的 marquee/轮播动画
-     * 占着，uiautomator dump 永远报 "could not get idle state"，拿不到 UI 层级；
-     * 而模块运行在 App 进程里，可以直接把 View 树打出来。
-     * 只打一次、只打屏幕上半部分，避免刷屏。
-     */
-    /**
-     * v1.9.21：「我的」页 View 树转储改成了**运行时开关**，不再需要为了诊断重新编译。
-     *
-     * 发版时保持关闭 —— 开销只是偶尔一次 File.exists()，可以忽略；
-     * 适配新版本时在手机上建一个空文件即可打开（不用改代码、不用重新构建）：
-     *   adb shell su -c 'touch /data/data/com.xs.fm/cache/dump_mine'
-     * 然后进入「我的」页，转储会写到：
-     *   /data/data/com.xs.fm/cache/mine_tree.txt
-     */
-    private static final String DEBUG_DUMP_MINE_FILE = "dump_mine";
-
-    private boolean mineDumpWanted(Activity act) {
-        try {
-            return new java.io.File(act.getCacheDir(), DEBUG_DUMP_MINE_FILE).exists();
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    /**
-     * 各 Activity 上一次转储的时间。
-     *
-     * 注意必须**分 Activity 记录**：一开始用了全局一个 long，结果 map 遍历顺序固定的那个
-     * Activity 每次都抢先、把限频占满，其他页面永远拿不到转储。
-     */
-    private final java.util.Map<String, Long> lastDumpTimeByAct = new java.util.HashMap<>();
-
-    /**
-     * v1.9.21 诊断：把**当前 Activity 的整个 View 树**写一份到 /data/data/com.xs.fm/cache/tree_&lt;Activity&gt;.txt。
-     *
-     * 不再限定「我的」页 —— 调「我的」页时要看「我的」页，改首页时要看首页，
-     * 而 uiautomator 因为轮播/marquee 动画永远拿不到 idle。这份转储是唯一可靠的层级证据。
-     * 每 3 秒重写一次（文件名带 Activity 名），所以随时切页、随时拉最新的就能看到那一页的真实结构。
-     */
-    private void dumpMineTreeOnce(Activity act) {
-        if (act == null || !mineDumpWanted(act)) return;
-        String key = act.getClass().getName();
-        long now = System.currentTimeMillis();
-        Long last = lastDumpTimeByAct.get(key);
-        if (last != null && now - last < 3000) return;
-        lastDumpTimeByAct.put(key, now);
-        try {
-            StringBuilder sb = new StringBuilder();
-            dumpViewTree(act.getWindow().getDecorView(), 0, sb);
-            // LSPosed 日志会丢/截断，而这份转储动辄六七百行、会直接刷爆日志区，
-            // 所以**只写文件、不往 XposedBridge 里逐行打**（root 可读，最可靠）。
-            String name = "tree_" + act.getClass().getSimpleName() + ".txt";
-            java.io.File f = new java.io.File(act.getCacheDir(), name);
-            java.io.FileOutputStream out = new java.io.FileOutputStream(f);
-            out.write(sb.toString().getBytes("UTF-8"));
-            out.close();
-        } catch (Throwable ignored) {}
-    }
-
-    /** 当前进程内所有还活着的 Activity。 */
-    private java.util.List<Activity> getAllActivities() {
-        java.util.List<Activity> out = new java.util.ArrayList<>();
-        try {
-            Class<?> atClass = Class.forName("android.app.ActivityThread");
-            Object at = atClass.getMethod("currentActivityThread").invoke(null);
-            Field af = atClass.getDeclaredField("mActivities");
-            af.setAccessible(true);
-            java.util.Map<?, ?> map = (java.util.Map<?, ?>) af.get(at);
-            if (map == null) return out;
-            for (Object ref : map.values()) {
-                Field arf = ref.getClass().getDeclaredField("activity");
-                arf.setAccessible(true);
-                Activity a = (Activity) arf.get(ref);
-                if (a != null && !a.isFinishing() && !a.isDestroyed()) out.add(a);
-            }
-        } catch (Throwable ignored) {}
-        return out;
-    }
-
-    /**
-     * v1.9.21 新增：【版本无关】的「我的」页区块隐藏。
-     *
-     * 为什么不能再靠资源 id：番茄每版都会重排/改名（6.7.1.32 用 br7/e4q/ej2/ce4，
-     * 6.7.2.32 又换成 bsf/e87/e4q，而且同一个 e4q 在两版里指向的东西完全不同）。
-     * 硬编码 id 每版都得重新逆向，改错一处就留一片空白。
-     *
-     * 改用「文案 + 结构」定位：
-     *   ① 在「我的」页里找到锚点文案（我的资产 / 我的消息 / 尊享免广告 / 邀请好友…）；
-     *   ② 从这个 TextView 向上爬，取「最高一层还没爬到页面外壳的卡片容器」的祖先
-     *      （页面外壳 = 含「个人主页」头像行、或含顶部标签栏「全部/听书」的容器）；
-     *   ③ 把这张卡片整块 GONE，并把它的资源 id 登记进「强制隐藏」集合 ——
-     *      App 重建/重排时再由 setVisibility / addView 两个钩子压回去。
-     *
-     * 这样即使以后版本把资源 id 全换掉，只要这几块卡片的文案还在，就能继续生效。
-     */
-    private long lastMineGenericTime = 0;
-
-    private void hideMineGenericBlocks(Activity act, int[] cnt) {
-        if (act == null) return;
-        try {
-            // 限频：这一轮要做多次「全子树文本查找」，没必要每次 hideAll 都跑
-            long now = System.currentTimeMillis();
-            if (now - lastMineGenericTime < 2500) return;
-            View decor = act.getWindow().getDecorView();
-            if (!looksLikeMinePage(decor)) return;
-            lastMineGenericTime = now;
-            // ① 主手段：把「头像行所在容器」里除头像行以外的子块全部收掉（版本无关）。
-            View scope = findMineTopBlockContainer(decor);
-            if (scope != null) hideMineSiblingBlocks(scope, cnt);
-            // ② 后手：按锚点文案再扫一遍（限定在上面那个容器里，找不到容器时才全页扫），
-            //    兜住「卡片不在头像行容器里」的版本。
-            View searchRoot = scope != null ? scope : decor;
-            for (String label : MINE_BLOCK_LABELS) {
-                View tv = findTextViewByText(searchRoot, label, 0);
-                if (tv != null) hideMineBlockByText(tv, label, cnt);
-            }
-        } catch (Throwable ignored) {}
-    }
-
-    /**
-     * v1.9.21：【版本无关·主手段】定位「我的」页顶部那一整块卡片区的容器。
-     *
-     * 思路：拿住「个人主页」——这句文案只出现在头像/昵称行里，换版本也换不掉。
-     * 从它往上爬到「头像行」那一层（整宽、很扁的容器），再取它的父容器 ——
-     * 那个父容器就是「装着头像行 + 所有促销卡/入口卡/资产卡」的顶部块
-     * （6.7.2.32 实测为 CommonCustomAppBarLayout#c1 > LinearLayout#e63）。
-     *
-     * 拿到这个容器后，只要把「除头像行以外的子块」全部收掉就行 ——
-     * 不用再管它这一版叫什么名字、分成了几块，App 以后再往这里塞新广告位也照样自动收掉。
-     */
-    private View findMineTopBlockContainer(View decor) {
-        if (decor == null) return null;
-        try {
-            View anchor = findTextViewByText(decor, "个人主页", 0);
-            if (anchor == null) anchor = findTextViewByText(decor, "介绍一下自己吧", 0);
-            if (anchor == null) return null;
-            View root = decor.getRootView() != null ? decor.getRootView() : decor;
-            int sw = root.getWidth(), sh = root.getHeight();
-            if (sw <= 0 || sh <= 0) return null;
-            // 爬到「头像行」：宽度≥ 75% 屏宽且高度 ≤ 15% 屏高
-            View row = null;
-            View cur = anchor;
-            for (int i = 0; i < 6 && cur != null; i++) {
-                if (cur.getWidth() >= sw * 0.75f && cur.getHeight() > 0 && cur.getHeight() <= sh * 0.15f) {
-                    row = cur;
-                    break;
-                }
-                cur = cur.getParent() instanceof View ? (View) cur.getParent() : null;
-            }
-            if (row == null) return null;
-            View parent = row.getParent() instanceof View ? (View) row.getParent() : null;
-            if (!(parent instanceof ViewGroup)) return null;
-            if (((ViewGroup) parent).getChildCount() < 2) return null;      // 只有一个孩子 → 不是容器
-            if (parent.getWidth() < sw * 0.75f) return null;
-            return parent;
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    /**
-     * v1.9.21：【版本无关·主手段】把顶部块容器里除「头像行 / 标签栏 / 底部导航」以外的子块全部 GONE。
-     *
-     * 为什么不能只靠资源 id：6.7.1.32 用 br7/e4q/ej2/ce4，6.7.2.32 换成 bsf/e87/e4q，
-     * 而且同一个 e4q 在两版里指向的东西完全不同 —— 每版都要重新逆向，改错一处就留一片空白。
-     * 这一层直接用「兄弟关系」说话，与 id 名字无关。
-     */
-    private void hideMineSiblingBlocks(View scope, int[] cnt) {
-        if (!(scope instanceof ViewGroup)) return;
-        try {
-            ViewGroup g = (ViewGroup) scope;
-            int hidden = 0;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                View child = g.getChildAt(i);
-                if (child == null) continue;
-                if (isMineKeepChild(child)) continue;
-                if (child.getVisibility() == View.GONE) continue;
-                child.setVisibility(View.GONE);
-                if (child.getId() != View.NO_ID) addForceHideId(child.getId());
-                collapseEmptyAncestors(child, cnt);
-                hidden++;
-                XposedBridge.log("[" + TAG + "] 已隐藏我的页顶部区块(与头像行同级): "
-                        + child.getClass().getName() + " w=" + child.getWidth() + " h=" + child.getHeight());
-            }
-            cnt[0] += hidden;
-        } catch (Throwable ignored) {}
-    }
-
-    /**
-     * 顶部块容器里必须保留的子块 —— 完全按文案组合判定，与资源 id 无关。
-     *
-     * 目前只保留「头像/昵称行」；标签栏和底部导航没出现在这个容器里，但万一哪一版挪进来了，
-     * 这里也能拦住。宁可不藏，也不要误伤。
-     */
-    private boolean isMineKeepChild(View child) {
-        if (child == null) return true;
-        try {
-            if (treeHasText(child, "个人主页", 0)) return true;      // 头像/昵称行
-            if (treeHasText(child, "介绍一下自己吧", 0)) return true;
-            if (treeHasText(child, "全部", 0) && treeHasText(child, "听书", 0)) return true;   // 标签栏
-            if (treeHasText(child, "首页", 0) && treeHasText(child, "我的", 0)) return true;    // 底部导航
-            // 万一以后把「设置/反馈/继续播放」也放进这个容器，不要误伤
-            if (treeHasText(child, "继续播放", 0) || treeHasText(child, "设置", 0)
-                    || treeHasText(child, "设置与反馈", 0) || treeHasText(child, "意见反馈", 0)
-                    || treeHasText(child, "帮助与反馈", 0)) return true;
-        } catch (Throwable ignored) {
-            return true;   // 判定不了就保留（安全侧）
-        }
-        return false;
-    }
-
-    /**
-     * v1.9.21：【版本无关】当前页面是不是「我的」页 —— 只看文案，不看资源 id。
-     *
-     * 「我的资产」只在「我的」页出现；万一以后 App 改了这句文案，再用
-     * 「个人主页 + 金币余额」这个组合兜底（两者同时出现也只在「我的」页）。
-     * 之前用 e4q/e4r 这类资源 id 判定，每换一版就失效一次，是这次踩的最大坑。
-     */
-    private boolean looksLikeMinePage(View decor) {
-        if (decor == null) return false;
-        try {
-            if (treeHasText(decor, "我的资产", 0)) return true;
-            return treeHasText(decor, "个人主页", 0) && treeHasText(decor, "金币余额", 0);
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    /**
-     * 「我的」页要整块收掉的区块：按锚点文案找（换版本也换不掉这些文案）。
-     *
-     * 分组说明：
-     *   ① 板块标题：爬到「卡片容器」那一层整块收掉；
-     *   ② 快捷入口子项：爬到「快捷入口栏」那一层整条收掉；
-     *   ③ 促销/福利文案：爬到 VIP 促销卡、签到条那一层。
-     * 刻意不放「VIP」「福利」这种太短的词（两三个字很容易在别的模块撞上），
-     * 改用「尊享免广告」「无限下载」「立即签到」这种只在本页出现的短语。
-     */
-    private static final String[] MINE_BLOCK_LABELS = {
-            "我的资产", "邀请好友", "好友管理", "剩余时长",
-            "我的消息", "游戏中心", "优惠券", "购物车", "商城",
-            "尊享免广告", "无限下载", "立即开通", "立即签到",
-    };
-
-    private void hideMineBlockByText(View v, String label, int[] cnt) {
-        if (v == null) return;
-        try {
-            View root = v.getRootView();
-            if (root == null) return;
-            int sw = root.getWidth(), sh = root.getHeight();
-            if (sw <= 0 || sh <= 0) return;
-            // 位置护栏：只处理「真的显示在屏幕上」的文案。
-            // 底部四个 Tab 共用一个 decor，别的 Tab 里也有「商城/购物车」这类词，
-            // 靠这个护栏挡住屏幕外那些同名节点。
-            if (!v.isShown()) return;
-            View block = null;
-            View cur = v;
-            for (int i = 0; i < 8; i++) {
-                View parent = cur.getParent() instanceof View ? (View) cur.getParent() : null;
-                if (parent == null) break;
-                if (mineChromePresent(parent)) break;      // 再往上就是头像行/标签栏，绝不越过
-                if (cur.getWidth() >= sw * 0.75f && cur.getHeight() > 0 && cur.getHeight() <= sh * 0.45f) {
-                    block = cur;                           // 这一层还算「卡片」
-                }
-                cur = parent;
-            }
-            if (block == null || block == v || block.getVisibility() == View.GONE) return;
-            block.setVisibility(View.GONE);
-            int bid = block.getId();
-            if (bid != View.NO_ID) addForceHideId(bid);   // 重建后由 addView / setVisibility 钩子继续压
-            cnt[0]++;
-            XposedBridge.log("[" + TAG + "] 已隐藏我的页区块['" + label + "'] "
-                    + block.getClass().getName() + " w=" + block.getWidth() + " h=" + block.getHeight()
-                    + (bid != View.NO_ID ? (" id=0x" + Integer.toHexString(bid)) : ""));
-            collapseEmptyAncestors(block, cnt);           // 【去空白】把外面剩下的空壳一起收掉
-        } catch (Throwable ignored) {}
-    }
-
-    /** 当前节点是否已经爬到「我的」页的页面外壳（头像行 / 顶部标签栏）。 */
-    private boolean mineChromePresent(View v) {
-        if (v == null) return true;
-        try {
-            if (treeHasText(v, "个人主页", 0)) return true;
-            return treeHasText(v, "全部", 0) && treeHasText(v, "听书", 0);
-        } catch (Throwable ignored) {
-            return true;
-        }
-    }
-
-    /** 把资源 id 追加进「强制隐藏」集合（App 重建/重排后继续压 GONE）。 */
-    private void addForceHideId(int id) {
-        if (id == View.NO_ID) return;
-        Set<Integer> ids = cachedHideIds;
-        if (ids == null) {
-            ids = new HashSet<>();
-            cachedHideIds = ids;
-        }
-        ids.add(id);
-    }
-
-    /** 找到第一个包含指定文案的 TextView。 */
-    private View findTextViewByText(View v, String needle, int depth) {
-        if (v == null || depth > 22) return null;
-        if (v instanceof android.widget.TextView) {
-            CharSequence cs = ((android.widget.TextView) v).getText();
-            if (cs != null && cs.toString().contains(needle)) return v;
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                View r = findTextViewByText(g.getChildAt(i), needle, depth + 1);
-                if (r != null) return r;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * v1.9.21 诊断用：每 2 秒轮询一次，直到把「我的」页视图树抓到为止。
-     * 由 App 缓存目录里的 {@link #DEBUG_DUMP_MINE_FILE} 开关文件控制（见 dumpMineTreeOnce）。
-     */
-    private void scheduleMineTreeDump() {
-        final Handler h = new Handler(Looper.getMainLooper());
-        h.postDelayed(new Runnable() {
-            @Override public void run() {
-                try {
-                    // 先用 Application 的 cacheDir 看一下开关文件在不在 ——
-                    // 没开就什么都不做（一个 File.exists()，开销可忽略）。
-                    Object app = Class.forName("android.app.ActivityThread")
-                            .getMethod("currentApplication").invoke(null);
-                    if (app instanceof android.content.Context
-                            && new java.io.File(((android.content.Context) app).getCacheDir(),
-                                    DEBUG_DUMP_MINE_FILE).exists()) {
-                        for (Activity a : getAllActivities()) dumpMineTreeOnce(a);
-                    }
-                } catch (Throwable ignored) {}
-                h.postDelayed(this, 2000);        // 常驻；开关没开时每 2 秒只做一次 File.exists()
-            }
-        }, 2000);
-    }
-
-    /** 在 View 树里查找包含指定文案的 TextView（深度受限，只用于「我的」页识别）。 */
-    private boolean treeHasText(View v, String needle, int depth) {
-        if (v == null || depth > 22) return false;
-        if (v instanceof android.widget.TextView) {
-            CharSequence cs = ((android.widget.TextView) v).getText();
-            if (cs != null && cs.toString().contains(needle)) return true;
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                if (treeHasText(g.getChildAt(i), needle, depth + 1)) return true;
-            }
-        }
-        return false;
-    }
-
-    private void dumpViewTree(View v, int depth, StringBuilder sb) {
-        if (v == null || depth > 20) return;
-        int[] loc = new int[2];
-        try { v.getLocationOnScreen(loc); } catch (Throwable ignored) {}
-        if (loc[1] > 2300) return;                       // 跳过屏幕外/最底部的装饰节点
-        String id = "-";
-        try {
-            if (v.getId() != View.NO_ID) id = v.getResources().getResourceEntryName(v.getId());
-        } catch (Throwable ignored) {}
-        String txt = "";
-        if (v instanceof android.widget.TextView) {
-            CharSequence cs = ((android.widget.TextView) v).getText();
-            if (cs != null) {
-                String t = cs.toString().replace('\n', ' ').trim();
-                if (t.length() > 30) t = t.substring(0, 30);
-                if (t.length() > 0) txt = " '" + t + "'";
-            }
-        }
-        sb.append(depth).append(' ').append(v.getClass().getName()).append('#').append(id)
-                .append(v.getVisibility() == View.GONE ? " GONE"
-                        : v.getVisibility() == View.INVISIBLE ? " INVIS" : "")
-                .append(' ').append(v.getWidth()).append('x').append(v.getHeight())
-                .append(" @").append(loc[0]).append(',').append(loc[1]).append(txt).append('\n');
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) dumpViewTree(g.getChildAt(i), depth + 1, sb);
-        }
-    }
-
-    /**
      * v1.9.20：「我的」页头部需要屏蔽的入口文案。
      * 只用于「我的」页（见 {@link #isMinePage}），因此可以放心放宽到「含有」匹配。
      */
@@ -1537,24 +764,16 @@ public class MainHook implements IXposedHookLoadPackage {
     /**
      * 当前显示的页面是否「我的」页。
      *
-     * 判定依据：优先用 #e4q（快捷入口栏），回退 #e4r（头像+昵称 容器）—— 两个都是「我的」页
-     * 独有的资源 id（首页/阅读页/听歌页均不存在），用它做闸门可以确保
-     * {@link #isMineHeaderBlockText} 的宽匹配不会误伤正文小说文本。
-     *
-     * ⚠️ v1.9.21：6.7.2.32 的「我的」页已经**没有 e4r 了**（实测 View 树里查无此 id），
-     * 只用 e4r 判定会让整个「我的」页分支永远是 false —— 「我的消息/游戏中心」的文本规则
-     * 静默失效。所以改成 e4q 优先。
+     * 判定依据：#e4r（头像+昵称 容器）是「我的」页独有的资源 id（首页/阅读页/听歌页均不存在），
+     * 用它做闸门可以确保 {@link #isMineHeaderBlockText} 的宽匹配不会误伤正文小说文本。
      */
     private boolean isMinePage(Activity act) {
         if (act == null) return false;
         try {
             View decor = act.getWindow().getDecorView();
             if (decor == minePageDecor) return minePageFlag;   // 同一帧内缓存，避免每行文本都 findViewById
-            boolean isMine = false;
-            for (String marker : new String[]{"e4q", "e4r"}) {
-                int id = act.getResources().getIdentifier(marker, "id", act.getPackageName());
-                if (id > 0 && decor.findViewById(id) != null) { isMine = true; break; }
-            }
+            int id = act.getResources().getIdentifier("e4r", "id", act.getPackageName());
+            boolean isMine = id > 0 && decor.findViewById(id) != null;
             minePageDecor = decor;
             minePageFlag = isMine;
             return isMine;
@@ -2193,10 +1412,7 @@ public class MainHook implements IXposedHookLoadPackage {
             while (p != null && guard++ < 40) {
                 View par = p.getParent() instanceof View ? (View) p.getParent() : null;
                 if (par != null && isAppBarLike(par)) {
-                    // v1.9.21：这条会随着看门狗/布局事件每 2 秒重复打印，改成每段文案只打一次。
-                    if (loggedTopBarSkipped.add(t)) {
-                        XposedBridge.log("[" + TAG + "] 跳过隐藏(位于顶栏内): '" + t + "'");
-                    }
+                    XposedBridge.log("[" + TAG + "] 跳过隐藏(位于顶栏内): '" + t + "'");
                     return;
                 }
                 p = par;
@@ -2301,31 +1517,27 @@ public class MainHook implements IXposedHookLoadPackage {
         try { setField(obj, name, value); } catch (Throwable ignored) {}
     }
 
-    /**
-     * v1.9.21：兜底清理已经发布出去的广告快捷方式。
-     *
-     * 与 hookShortcutCleaner 用同一套规则（{@link #isAdShortcut}），每次 onResume 跑一次。
-     * 为什么还需要它：App 会在安装后/后台把这三个快捷方式**先**发布出去，
-     * 而长按菜单是 Launcher 进程读 ShortcutManager 的数据渲染的 —— 只有真正删掉才算数。
-     * 因为 App 会反复重新发布，这里是「删了它再发」的拉锯，所以日志按 id 去重，避免刷屏。
-     */
     private void removeAdShortcuts(Activity act) {
         try {
+            final String[] BAD = {"金币", "领现金", "畅听", "福利", "领取", "赚钱", "卸载", "存储"};
             Object sm = act.getSystemService("shortcut");
             if (sm == null) return;
             java.util.List<?> dyn = (java.util.List<?>) sm.getClass().getMethod("getDynamicShortcuts").invoke(sm);
             if (dyn == null || dyn.isEmpty()) return;
             java.util.ArrayList<String> rm = new java.util.ArrayList<>();
             for (Object o : dyn) {
-                if (isAdShortcut(o)) {
-                    String id = str(o, "getId");
-                    if (id.length() > 0) rm.add(id);
-                }
+                try {
+                    String id = (String) o.getClass().getMethod("getId").invoke(o);
+                    CharSequence label = (CharSequence) o.getClass().getMethod("getShortLabel").invoke(o);
+                    String all = (id + " " + label).toLowerCase();
+                    for (String b : BAD) {
+                        if (all.contains(b.toLowerCase())) { rm.add(id); break; }
+                    }
+                } catch (Throwable ignored) {}
             }
-            if (rm.isEmpty()) return;
-            sm.getClass().getMethod("removeDynamicShortcuts", java.util.List.class).invoke(sm, rm);
-            if (filteredShortcutIds.addAll(rm)) {
-                XposedBridge.log("[" + TAG + "] 已移除桌面快捷方式(长按图标广告): " + rm);
+            if (!rm.isEmpty()) {
+                sm.getClass().getMethod("removeDynamicShortcuts", java.util.List.class).invoke(sm, rm);
+                XposedBridge.log("[" + TAG + "] 已移除桌面快捷方式: " + rm);
             }
         } catch (Throwable t) {
             XposedBridge.log("[" + TAG + "] removeAdShortcuts: " + t);
@@ -2386,11 +1598,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         try {
                             View v = (View) param.thisObject;
                             v.setVisibility(View.GONE);
-                            // v1.9.21：这几个 View 会被高频反复构造（一次启动上千次），
-                            // 日志只打一次，否则会把 LSPosed 日志区整个淹掉。
-                            if (loggedCtorClasses.add(clsName)) {
-                                XposedBridge.log("[" + TAG + "] 已拦截广告View(构造即GONE): " + clsName);
-                            }
+                            XposedBridge.log("[" + TAG + "] 已拦截广告View(构造即GONE): " + clsName);
                         } catch (Throwable ignored) {}
                     }
                 });
@@ -2413,13 +1621,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         // v1.9.11 新增：按已知广告资源 ID 预拦截，消除首帧闪现。
                         // 资源 ID 在 XML inflate 时已通过 setId() 设置，addView 前已可用。
                         int cid = child.getId();
-                        if (cid == View.NO_ID) return;
-                        Set<Integer> cached = cachedHideIds;
-                        if (PRE_HIDE_RES_IDS.contains(cid)
-                                || (cached != null && cached.contains(cid))) {
-                            // v1.9.21：cachedHideIds（「我的」页那几块）也要在这里拦。
-                            // 只靠 View.setVisibility 兜底是不够的：App 重新 inflate 时默认就是
-                            // VISIBLE，压根不会调 setVisibility(VISIBLE)，于是「藏了又回来」。
+                        if (cid != View.NO_ID && PRE_HIDE_RES_IDS.contains(cid)) {
                             child.setVisibility(View.GONE);
                             XposedBridge.log("[" + TAG + "] 已拦截广告View(addView时GONE by resId): 0x" + Integer.toHexString(cid));
                         }
@@ -2569,10 +1771,7 @@ public class MainHook implements IXposedHookLoadPackage {
         final String[] adViews = {
                 "com.dragon.read.music.player.block.common.adunlock.MusicAdUnlockTimeView",
                 "com.dragon.read.admodule.adfm.unlocktime.AdUnlockTimeFloatingView",
-                "com.dragon.read.admodule.adfm.unlocktime.entranceview.h",
-                // v1.9.29: 全天畅听计时相关 View
-                "com.dragon.read.admodule.adfm.unlocktime.wholeday.u0",
-                "com.dragon.read.admodule.adfm.unlocktime.wholeday.kmp.v2.g0"
+                "com.dragon.read.admodule.adfm.unlocktime.entranceview.h"
         };
         for (final String vn : adViews) {
             try {
@@ -2797,14 +1996,14 @@ public class MainHook implements IXposedHookLoadPackage {
      * “Line”。每次翻页/重排，阅读器都会重新 constructing 并把它插进页面，
      * 所以“文末 GONE 一下”只能隐藏一帧，下一帧又重新出现 —— 必须从“生成入口”这一步堵住。
      *
-     * <p>反汇编 6.7.2.32 定位到（classes14.dex）：
+     * <p>反汇编 6.7.1.32 定位到（classes14.dex）：
      * <pre>
-     *   Lf32/q;->a(...)Lcom/dragon/read/ad/AddShortcutLine;   // 加桌面快捷方式行
-     *   Lf32/q;->b(...)Lcom/dragon/read/ad/ButtonLine;         // 章节末广告按钮行（「看小视频免30分钟广告」）
-     *   Lf32/q;->c(...)Lcom/dragon/read/ad/BuyVipEntranceLine; // 章节末买VIP入口行
+     *   Lf22/q;->a(...)Lcom/dragon/read/ad/AddShortcutLine;   // 加桌面快捷方式行
+     *   Lf22/q;->b(...)Lcom/dragon/read/ad/ButtonLine;         // 章节末广告按钮行（「看小视频免30分钟广告」）
+     *   Lf22/q;->c(...)Lcom/dragon/read/ad/BuyVipEntranceLine; // 章节末买VIP入口行
      * </pre>
      * 用 tools/findcallers.py 确认：三个方法**只**被阅读页广告行 provider
-     * {@code z33.d.a(be3/c)} 调用，且调用点全部是 {@code if-nez v0, -> 0x01eb} 判空跳转 ——
+     * {@code r23.d.a(tc3/c)} 调用，且调用点全部是 {@code if-nez v0, -> 0x01eb} 判空跳转 ——
      * 因此让它们返回 null，App 会自己跳过「添加该行」，既干净又不会报错。
      *
      * <p>只屏蔽这三个广告入口行工厂，不动其他阅读器 Line，正文排版不受影响、也不会留空白。
@@ -2813,10 +2012,10 @@ public class MainHook implements IXposedHookLoadPackage {
         if (readerAdLineHooked) return;
         Class<?> q = null;
         try {
-            q = XposedHelpers.findClassIfExists("f32.q", appCl);
+            q = XposedHelpers.findClassIfExists("f22.q", appCl);
         } catch (Throwable ignored) {}
         if (q == null) {
-            XposedBridge.log("[" + TAG + "] 阅读页广告行工厂 f32.q 未找到，稍后重试");
+            XposedBridge.log("[" + TAG + "] 阅读页广告行工厂 f22.q 未找到，稍后重试");
             return;
         }
         readerAdLineHooked = true;
@@ -2832,7 +2031,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             if (rt == null || !rt.getName().startsWith("com.dragon.read.ad.")) return;
                             param.setResult(null);
                             if (readerAdLineBlocked.add(m + ":" + rt.getSimpleName())) {
-                                XposedBridge.log("[" + TAG + "] 🚫 已从源头屏蔽阅读页广告入口行: f32.q."
+                                XposedBridge.log("[" + TAG + "] 🚫 已从源头屏蔽阅读页广告入口行: f22.q."
                                         + m + "() -> " + rt.getSimpleName());
                             }
                         } catch (Throwable ignored) {}
@@ -2840,7 +2039,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 });
             } catch (Throwable ignored) {}
         }
-        XposedBridge.log("[" + TAG + "] ✅ 阅读页广告入口行工厂拦截已挂载: f32.q.a/b/c");
+        XposedBridge.log("[" + TAG + "] ✅ 阅读页广告入口行工厂拦截已挂载: f22.q.a/b/c");
     }
 
     /**
@@ -2848,19 +2047,19 @@ public class MainHook implements IXposedHookLoadPackage {
      * （屏幕上那整屏的「仅限当前设备开通7天会员，限时有效」浮层；整层无 resource-id、
      * 只有 content-desc，是 Lynx 自绘的促销页）。
      *
-     * <p>反汇编 6.7.2.32 classes14.dex 定位到它的原生入口（H5/Lynx 通过 JSBridge 调过来）：
+     * <p>反汇编 classes14.dex 定位到它的原生入口（H5/Lynx 通过 JSBridge 调过来）：
      * <pre>
      *   Lcom/dragon/read/hybrid/bridge/modules/vip/a;
      *     showVipPromotionPopup(IBridgeContext, String, Z, I, I)V
      * </pre>
-     * 方法体内 {@code new i23.d0(ctx)} 并最后调 {@code com.dragon.read.widget.dialog.i.show()}
-     * 把整屏促销弹层展示出来（i23.d0 继承 com.dragon.read.widget.dialog.i）。
+     * 方法体内 {@code new a13.d0(ctx)} 并最后调 {@code com.dragon.read.widget.dialog.i.show()}
+     * 把整屏促销弹层展示出来（a13.d0 继承 com.dragon.read.widget.dialog.i）。
      *
      * <p>拦截策略（两层）：
      * <ol>
      *   <li>把 {@code showVipPromotionPopup} 整个短路（该方法返回 void、正常展示分支也
      *       不回调 JS，短路不会造成页面卡死）；</li>
-     *   <li>兜底：即使从别的路径直接 {@code i23.d0.show()}，也把该类的 show 压掉。</li>
+     *   <li>兜底：即使从别的路径直接 {@code a13.d0.show()}，也把该类的 show 压掉。</li>
      * </ol>
      */
     private void hookVipPromotionPopup() {
@@ -2880,7 +2079,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 any = true;
             }
         } catch (Throwable ignored) {}
-        // ② 兜底：促销弹层类 i23.d0 直接 show 时压掉
+        // ② 兜底：促销弹层类 a13.d0 直接 show 时压掉
         try {
             Class<?> dlgBase = XposedHelpers.findClassIfExists(
                     "com.dragon.read.widget.dialog.i", appCl);
@@ -2889,9 +2088,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     @Override protected void beforeHookedMethod(MethodHookParam param) {
                         try {
                             if (param.thisObject != null
-                                    && "i23.d0".equals(param.thisObject.getClass().getName())) {
+                                    && "a13.d0".equals(param.thisObject.getClass().getName())) {
                                 param.setResult(null);
-                                XposedBridge.log("[" + TAG + "] 🚫 已拦截VIP促销弹层 show(): i23.d0");
+                                XposedBridge.log("[" + TAG + "] 🚫 已拦截VIP促销弹层 show(): a13.d0");
                             }
                         } catch (Throwable ignored) {}
                     }
@@ -3230,13 +2429,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log("[" + TAG + "] silk subwindow manager 接口未找到，跳过");
                 return;
             }
-            // ⚠️ v1.9.23 修：`manager.c` 是**接口/抽象类**，它的 `e(y70.c)` 没有方法体，
-            // 直接 hook 会抛 IllegalArgumentException("... is abstract: it has no body to hook")，
-            // 于是这个拦截器**从 v1.9.7 起就一直静默失效**（只在日志里留一行「失败」）。
-            // 逆向 classes11.dex 拿到两个具体实现类，改为 hook 具体实现：
-            //   Lcom/bytedance/component/silk/road/subwindow/manager/f;
-            //   Lz70/a;
-            final XC_MethodHook silkHook = new XC_MethodHook() {
+            XposedBridge.hookAllMethods(mgrCls, "e", new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     try {
                         Object arg = (param.args != null && param.args.length > 0) ? param.args[0] : null;
@@ -3246,22 +2439,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                     } catch (Throwable ignored) {}
                 }
-            };
-            String[] silkTargets = {
-                    "com.bytedance.component.silk.road.subwindow.manager.c",  // 接口（旧版本可能是有方法体的抽象类）
-                    "com.bytedance.component.silk.road.subwindow.manager.f",  // 具体实现
-                    "z70.a",                                                  // 具体实现
-            };
-            int silkHooked = 0;
-            for (String sn : silkTargets) {
-                try {
-                    Class<?> sc = XposedHelpers.findClassIfExists(sn, appCl);
-                    if (sc == null) continue;
-                    XposedBridge.hookAllMethods(sc, "e", silkHook);
-                    silkHooked++;
-                } catch (Throwable ignored) {}
-            }
-            XposedBridge.log("[" + TAG + "] silk subwindow manager 拦截器已启用（成功挂载 " + silkHooked + " 个类）");
+            });
+            XposedBridge.log("[" + TAG + "] silk subwindow manager 拦截器已启用");
         } catch (Throwable t) {
             XposedBridge.log("[" + TAG + "] silk subwindow manager 拦截器失败: " + t);
         }
@@ -3384,11 +2563,6 @@ public class MainHook implements IXposedHookLoadPackage {
                         final Dialog dlg = (Dialog) param.thisObject;
                         if (dlg == null) return;
                         String name = dlg.getClass().getName();
-                        // v1.9.22 诊断：把每个真正 show 出来的 Dialog 类名记一次（去重），
-                        // 方便换版本后核对「漏网弹窗」到底是哪个类。
-                        if (loggedDialogClasses.add(name)) {
-                            XposedBridge.log("[" + TAG + "] Dialog.show 观测到类: " + name);
-                        }
                         boolean classHit = name.contains("luckycat") || name.contains("Lucky")
                                 || name.contains("Update") || name.contains("Upgrade")
                                 || name.contains("AdDialog") || name.contains("AdPop")
@@ -3397,36 +2571,24 @@ public class MainHook implements IXposedHookLoadPackage {
                                 || name.contains("Reward") || name.contains("Task")
                                 || name.contains("Welfare") || name.contains("RedPacket")
                                 || name.contains("Sign") || name.contains("Invite")
-                                || name.contains("Mall") || name.contains("Shop")
-                                || name.contains("Promo") || name.contains("Promotion")
-                                || name.contains("VipPromo") || name.contains("VipPopup")
-                                // v1.9.23：广告模块自己的弹窗（逆向：com.dragon.read.admodule.adfm.unlocktime.ui.* 共 8 个）
-                                || name.contains("admodule") || name.contains("unlocktime");
+                                || name.contains("Mall") || name.contains("Shop");
                         if (classHit) {
                             dlg.dismiss();
                             XposedBridge.log("[" + TAG + "] 已拦截弹窗(类名): " + name);
                             return;
                         }
-                        // v1.9.22：Lynx/自绘促销弹层是异步渲染的，且文案只落在 content-desc 上
-                        // （没有任何 TextView），单次 400ms + 只读 text 的扫描必然漏掉
-                        // 「仅限当前设备开通7天会员，限时有效」这类弹层 →
-                        // 改为多点扫描(0/300/800/1600/2800ms) + 同时扫 text 与 content-desc。
-                        final int[] delays = {0, 300, 800, 1600, 2800};
-                        for (final int delay : delays) {
-                            h.postDelayed(new Runnable() {
-                                @Override public void run() {
-                                    try {
-                                        if (!dlg.isShowing()) return;
-                                        String hit = findBadDialogText(dlg);
-                                        if (hit == null) hit = findPromoPopupText(dlg);
-                                        if (hit != null) {
-                                            dlg.dismiss();
-                                            XposedBridge.log("[" + TAG + "] 已拦截弹窗(内容:'" + hit + "'): " + name);
-                                        }
-                                    } catch (Throwable ignored) {}
-                                }
-                            }, delay);
-                        }
+                        h.postDelayed(new Runnable() {
+                            @Override public void run() {
+                                try {
+                                    if (!dlg.isShowing()) return;
+                                    String hit = findBadDialogText(dlg);
+                                    if (hit != null) {
+                                        dlg.dismiss();
+                                        XposedBridge.log("[" + TAG + "] 已拦截弹窗(内容:'" + hit + "'): " + name);
+                                    }
+                                } catch (Throwable ignored) {}
+                            }
+                        }, 400);
                     } catch (Throwable ignored) {}
                 }
             });
@@ -3444,636 +2606,6 @@ public class MainHook implements IXposedHookLoadPackage {
             return null;
         }
     }
-
-    // ================= v1.9.22：会员/促销弹层通用拦截 =================
-
-    /**
-     * 会员/促销弹层文案特征。怀疑命中即整层 dismiss —— 这些文案只会出现在
-     * 服务端下发的促销浮层里（如「仅限当前设备开通7天会员，限时有效」），
-     * 不会出现在正常页面内容上。
-     */
-    private static final String[] PROMO_POPUP_PATTERNS = {
-            "仅限当前设备", "限时有效", "限时优惠", "限时特惠", "限时秒杀",
-            "不自动续费", "随机优惠", "开通7天", "7天会员", "会员特惠",
-            "续费立减", "开通享", "会员权益", "首月", "限时福利", "专享价",
-            // v1.9.24：电商大促浮窗（双11/618 等）。这类组合词不会出现在听书/阅读正文里，
-            // 只会出现在运营下发的促销浮层/弹窗上。
-            "双11", "双十一", "11.11", "狂欢", "预售", "定金", "尾款",
-            "满减", "领券", "百亿补贴", "到手价", "神券", "限时抢",
-            "折上折", "购物车", "抢购",
-    };
-
-    /** 单条文案是否像会员/促销弹层文案（仅用于弹窗内容，不用于页面内入口） */
-    private boolean isPromoPopupText(String s) {
-        if (s == null) return false;
-        String t = s.trim();
-        if (t.isEmpty() || t.length() > 90) return false;
-        for (String k : PROMO_POPUP_PATTERNS) {
-            if (t.contains(k)) return true;
-        }
-        // 「开通/续费」+「会员」组合（文案可能是「开通会员」「立即续费会员」等）
-        if ((t.contains("开通") || t.contains("续费")) && t.contains("会员")) return true;
-        return false;
-    }
-
-    /**
-     * 扫弹窗子树，找会员/促销文案。
-     * 关键：Lynx/自绘弹层没有任何 TextView，文案只落在 View 的 content-desc 上
-     * （uiautomator 里看到的 desc=[仅限当前设备开通7天会员，限时有效] 就是它），
-     * 所以这里对**所有 View** 都读 content-desc，而不只是 TextView.getText()。
-     */
-    private String findPromoPopupText(Dialog dlg) {
-        try {
-            View decor = dlg.getWindow().getDecorView();
-            return findPromoTextIn(decor, 0);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    private String findPromoTextIn(View v, int depth) {
-        if (v == null || depth > 14) return null;
-        try {
-            CharSequence cd = v.getContentDescription();
-            if (cd != null) {
-                String s = cd.toString().trim();
-                if (isPromoPopupText(s)) return s;
-            }
-        } catch (Throwable ignored) {}
-        if (v instanceof TextView) {
-            try {
-                CharSequence cs = ((TextView) v).getText();
-                if (cs != null) {
-                    String s = cs.toString().trim();
-                    if (isPromoPopupText(s)) return s;
-                }
-            } catch (Throwable ignored) {}
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup vg = (ViewGroup) v;
-            for (int i = 0; i < vg.getChildCount(); i++) {
-                String r = findPromoTextIn(vg.getChildAt(i), depth + 1);
-                if (r != null) return r;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * v1.9.23 新增：屏蔽「金币语音播报」——听书一段时间后突然冒出来的
-     * 「XX金币已到账…」语音广告（Polaris 增长体系下发，不是 TTS 而是下载的 .aac）。
-     *
-     * <p>逆向 classes13.dex 定位（文案只在这套 dex 里）：
-     * <pre>
-     *   '开始播放语音播报' / '金币语音播报完成' / '已关闭金币播报'
-     *   '阅读%d分钟，奖励%s金币已到账，可到福利页面查看!'
-     *   'warningtone_template_1_default_1.aac'
-     *   com.bytedance.polaris.impl.voice.w.a(String,String)      场景 POLARIS_COIN_AUDIO_TIPS
-     *   com.bytedance.polaris.impl.voice.w.o(SentenceTemplate,Map,long,String)
-     *   com.bytedance.polaris.impl.audio.AudioHelper.s(String)/r(long)/j(String)  底层音频
-     * </pre>
-     * 策略：上述入口全部短路（均为 void 方法，setResult(null) 不会破坏调用方状态机）。
-     * 只动语音播放（tone/audio tips）链路，不动听书播放器本身。
-     */
-    private void hookVoiceCastBlocker() {
-        if (voiceCastHooked) return;
-        boolean any = false;
-        any |= hookVoidMethods("com.bytedance.polaris.impl.voice.w", "a", "o");
-        any |= hookVoidMethods("com.bytedance.polaris.impl.audio.AudioHelper", "s", "r", "j");
-        if (any) {
-            voiceCastHooked = true;
-            XposedBridge.log("[" + TAG + "] ✅ 金币语音播报屏蔽已挂载 (Polaris voice/audio)");
-        } else {
-            XposedBridge.log("[" + TAG + "] 金币语音播报屏蔽：目标类未找到（版本可能已变）");
-        }
-    }
-
-    /** 把指定类中给定名字的无返回值方法全部短路（返回 void 才能安全 setResult(null)） */
-    private boolean hookVoidMethods(final String clsName, final String... methodNames) {
-        try {
-            Class<?> cls = XposedHelpers.findClassIfExists(clsName, appCl);
-            if (cls == null) {
-                XposedBridge.log("[" + TAG + "] 语音播报目标类不存在: " + clsName);
-                return false;
-            }
-            boolean hit = false;
-            for (final String mn : methodNames) {
-                try {
-                    XposedBridge.hookAllMethods(cls, mn, new XC_MethodHook() {
-                        @Override protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                if (param.method instanceof java.lang.reflect.Method
-                                        && ((java.lang.reflect.Method) param.method).getReturnType() != void.class) {
-                                    return;   // 非 void（如 o()Z 策略查询）不动，避免破坏状态机
-                                }
-                                param.setResult(null);
-                                String key = clsName + "." + mn;
-                                if (loggedVoiceEntries.add(key)) {
-                                    XposedBridge.log("[" + TAG + "] 🔇 已拦截语音播报: " + key);
-                                }
-                            } catch (Throwable ignored) {}
-                        }
-                    });
-                    hit = true;
-                } catch (Throwable ignored) {}
-            }
-            return hit;
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    /**
-     * v1.9.26：播放器数据源兜底。
-     *
-     * 背景：`novel-tts/warningtone_*.aac` 这类语音在 v1.9.25 的 Cronet 拦截里没被挡住 ——
-     * 实测 APK 里根本没有 `org.chromium.net.CronetEngine`（Cronet 是动态加载的），
-     * 所以改在**播放器入口**按 URL 拦截：
-     *   ① `com.ss.ttvideoengine.TTVideoEngine.setUrl/setDirectURL/setLocalURL`
-     *   ② `com.ss.ttm.player.MediaPlayer.setDataSource(String)`
-     *   ③ `android.media.MediaPlayer.setDataSource(String)`
-     * 命中 `warningtone` / `novel-tts` / `goldcoin_credited` 就不把 URL 交进去。
-     */
-    private void hookPlayerUrlBlocker() {
-        String[] tteMethods = {"setUrl", "setDirectURL", "setLocalURL"};
-        try {
-            Class<?> te = XposedHelpers.findClassIfExists("com.ss.ttvideoengine.TTVideoEngine", appCl);
-            if (te != null) {
-                XC_MethodHook h = new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam param) {
-                        try {
-                            if (param.args == null || param.args.length == 0) return;
-                            if (!(param.args[0] instanceof String)) return;
-                            String u = (String) param.args[0];
-                            if (isVoiceAdUrl(u)) {
-                                XposedBridge.log("[" + TAG + "] 🚫 拦截语音音频(TTVideoEngine): " + u);
-                                param.setResult(null);
-                            } else if (u.contains(".aac") || u.contains("tts")) {
-                                XposedBridge.log("[" + TAG + "] 🎵 TTE 数据源: " + u);
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                };
-                for (String m : tteMethods) {
-                    try {
-                        XposedHelpers.findAndHookMethod(te, m, String.class, h);
-                    } catch (Throwable ignored) {}
-                }
-                XposedBridge.log("[" + TAG + "] ✅ TTVideoEngine 语音音频拦截已启用");
-            }
-        } catch (Throwable t) {
-            XposedBridge.log("[" + TAG + "] TTVideoEngine 拦截失败: " + t);
-        }
-        try {
-            Class<?> mp = XposedHelpers.findClassIfExists("com.ss.ttm.player.MediaPlayer", appCl);
-            if (mp != null) {
-                XposedBridge.hookAllMethods(mp, "setDataSource", new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam param) {
-                        try {
-                            if (param.args == null || param.args.length == 0) return;
-                            Object a0 = param.args[0];
-                            if (!(a0 instanceof String)) return;
-                            String u = (String) a0;
-                            if (isVoiceAdUrl(u)) {
-                                XposedBridge.log("[" + TAG + "] 🚫 拦截语音音频(TTM): " + u);
-                                param.setResult(null);
-                            } else if (u.contains(".aac") || u.contains("tts")) {
-                                XposedBridge.log("[" + TAG + "] 🎵 TTM 数据源: " + u);
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                });
-                XposedBridge.log("[" + TAG + "] ✅ TTM MediaPlayer 语音音频拦截已启用");
-            }
-        } catch (Throwable ignored) {}
-        // android.media.MediaPlayer：全量记录，命中即拦
-        try {
-            XposedBridge.hookAllMethods(android.media.MediaPlayer.class, "setDataSource", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    try {
-                        if (param.args == null || param.args.length == 0) return;
-                        Object a0 = param.args[0];
-                        if (!(a0 instanceof String)) return;
-                        String u = (String) a0;
-                        if (isVoiceAdUrl(u)) {
-                            XposedBridge.log("[" + TAG + "] 🚫 拦截语音音频(MediaPlayer): " + u);
-                            param.setResult(null);
-                        }
-                    } catch (Throwable ignored) {}
-                }
-            });
-        } catch (Throwable ignored) {}
-    }
-
-    /** v1.9.29 已打过日志的时长/特权拦截点（只打一次，避免刷屏） */
-    private final Set<String> loggedListenGate = new HashSet<>();
-
-    /**
-     * v1.9.29：畅听时长 / 全天畅听特权伪装。
-     *
-     * <p>现象（6.7.4.32 / 674 实测）：剩余时长归零后点「听书」，App 会
-     * ① 语音播报「您的畅听时长已用完，请播放广告」；
-     * ② 弹出 {@code com.dragon.read.admodule.adfm.unlocktime.wholeday.AdUnlockTimeDialogMix}
-     *    （「看1个小视频，可畅听一整天」）；
-     * ③ 播放器停在 PAUSED。</p>
-     *
-     * <p>取证（classes16.dex）：全天畅听状态由 {@code ...unlocktime.wholeday.u0}
-     * （日志 tag {@code ListenWholeDayManager}，KMP 版为 {@code ...wholeday.kmp.v2.g0}）维护，
-     * 它的 {@code C()} 读 {@code ListenTimeAdFreeInfo.hasPrivilege}；
-     * 特权过期时由 {@code ...reader.speech.ad.listen.strategy.*} 的 {@code Q(onPrivilegeExpire)} 回调
-     * 弹窗、暂停并播语音。</p>
-     *
-     * <p>处理：① 全天畅听状态恒为 true；② 网络模型 {@code ListenTimeAdFreeInfo} 构造/更新时
-     * 把 hasPrivilege/credible 补成 true；③ 把 onPrivilegeExpire 回调整段吞掉（不弹窗/不暂停/不播报），
-     * 播放器不再因为时长归零被拦。</p>
-     */
-    private void hookListenTimeGate() {
-        // ① 全天畅听状态管理器：C() 恒 true（isListenWholeDay）
-        for (String cn : new String[]{
-                "com.dragon.read.admodule.adfm.unlocktime.wholeday.u0",
-                "com.dragon.read.admodule.adfm.unlocktime.wholeday.kmp.v2.g0"}) {
-            try {
-                Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
-                if (cls == null) continue;
-                XposedHelpers.findAndHookMethod(cls, "C", new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            Object old = param.getResult();
-                            param.setResult(Boolean.TRUE);
-                            if (!Boolean.TRUE.equals(old)
-                                    && loggedListenGate.add("C:" + param.method.getDeclaringClass().getName())) {
-                                XposedBridge.log("[" + TAG + "] 🎧 全天畅听已伪装为 true（原值 false）: "
-                                        + param.method.getDeclaringClass().getName());
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                });
-                // l() 返回当前 ListenTimeAdFreeInfo，N() 是服务端状态回写
-                XposedHelpers.findAndHookMethod(cls, "l", new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam param) {
-                        forceAdFreeInfo(param.getResult(), "l()");
-                    }
-                });
-                XposedBridge.hookAllMethods(cls, "N", new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            if (param.args != null && param.args.length > 1) {
-                                forceAdFreeInfo(param.args[1], "N()");
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                });
-                XposedBridge.log("[" + TAG + "] ✅ 全天畅听特权伪装已挂载: " + cn);
-            } catch (Throwable t) {
-                XposedBridge.log("[" + TAG + "] 全天畅听伪装失败(" + cn + "): " + t);
-            }
-        }
-
-        // ② 网络模型实例构造即补丁，避免 App 缓存到 hasPrivilege=false
-        try {
-            Class<?> info = XposedHelpers.findClassIfExists("com.xs.fm.rpc.model.ListenTimeAdFreeInfo", appCl);
-            if (info != null) {
-                XposedBridge.hookAllConstructors(info, new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam param) {
-                        forceAdFreeInfo(param.thisObject, "<init>");
-                    }
-                });
-                XposedBridge.log("[" + TAG + "] ✅ ListenTimeAdFreeInfo 构造即补特权");
-            }
-        } catch (Throwable ignored) {}
-
-        // ②.5 剩余时长入口（倒计时/播放门槛）统一伪装
-        hookListenTimeProviders();
-
-        // ③ 特权过期回调：不弹「领取时长」、不暂停正文、不播提示语音
-        for (String cn : new String[]{
-                "com.dragon.read.reader.speech.ad.listen.strategy.h",
-                "com.dragon.read.reader.speech.ad.listen.strategy.i",
-                "com.dragon.read.reader.speech.ad.listen.strategy.l",
-                "com.dragon.read.reader.speech.ad.listen.strategy.kmp.v2.h",
-                "com.dragon.read.reader.speech.ad.listen.strategy.kmp.v2.l",
-                "com.dragon.read.reader.speech.ad.listen.strategy.kmp.v2.p"}) {
-            try {
-                Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
-                if (cls == null) continue;
-                XposedBridge.hookAllMethods(cls, "Q", new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam param) {
-                        try {
-                            if (param.args != null && param.args.length > 0) return;  // 只吞无参重载
-                            param.setResult(null);
-                            String name = param.method.getDeclaringClass().getName();
-                            if (loggedListenGate.add("Q:" + name)) {
-                                XposedBridge.log("[" + TAG + "] 🔇 已拦截特权过期回调(onPrivilegeExpire): " + name);
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                });
-            } catch (Throwable t) {
-                XposedBridge.log("[" + TAG + "] 特权过期回调拦截失败(" + cn + "): " + t);
-            }
-        }
-    }
-
-    /**
-     * v1.9.29：剩余畅听时长（倒计时）伪装。
-     *
-     * <p>播放页那个「00时00分00秒｜看1个视频两天畅听」的胶囊就是这里的值：
-     * {@code AdApi.getLeftListenTimeV2()} → 直接读 {@code ListenTimeManager.f()}（静态 long，ms），
-     * 另有 {@code getListenTime()/getLeftTimeFromSp()/getLeftListenTimeWithDefault()} 几个入口。
-     * 反编译 classes5.dex 确认 {@code getLeftListenTimeV2()} 的逻辑是：
-     * {@code if (u0.C()) return Long.MAX_VALUE; if (isVip()) return Long.MAX_VALUE; ... else return 0;}
-     * 所以时长归零后，只要这里返回正数，播放器就不会再走「时长已用完」分支。</p>
-     *
-     * 返回 24 小时（ms），足够听完很多章，且不会像 MAX_VALUE 那样在
-     * 「已达上限」/格式化（超过 99 小时显示 99）的地方出现奇怪文案。
-     */
-    private static final long FAKE_LEFT_LISTEN_MS = 24L * 60L * 60L * 1000L;
-
-    private void hookListenTimeProviders() {
-        // ① 剩余时长数据源：ListenTimeManager.f()（普通版 + KMP 版）
-        for (String cn : new String[]{
-                "com.dragon.read.admodule.patch.filter.ListenTimeManager",
-                "com.dragon.read.admodule.patch.filter.kmp.v2.ListenTimeManager"}) {
-            try {
-                Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
-                if (cls == null) continue;
-                XposedHelpers.findAndHookMethod(cls, "f", new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam param) {
-                        Object old = param.getResult();
-                        param.setResult(FAKE_LEFT_LISTEN_MS);
-                        if (loggedListenGate.add("f:" + param.method.getDeclaringClass().getName())) {
-                            XposedBridge.log("[" + TAG + "] ⏱ 剩余畅听时长已伪装: " + old + " -> "
-                                    + FAKE_LEFT_LISTEN_MS + " ms ("
-                                    + param.method.getDeclaringClass().getName() + ")");
-                        }
-                    }
-                });
-                XposedBridge.log("[" + TAG + "] ✅ 剩余畅听时长伪装已挂载: " + cn);
-            } catch (Throwable t) {
-                XposedBridge.log("[" + TAG + "] 剩余时长伪装失败(" + cn + "): " + t);
-            }
-        }
-        // ② AdApi 的几个读取入口（AdImpl 与 KMP 版）
-        for (String cn : new String[]{
-                "com.xs.fm.ad.impl.AdImpl",
-                "com.xs.fm.ad.impl.kmp.v2.AdImpl",
-                "com.xs.fm.ad.impl.kmp.v2.k0"}) {
-            Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
-            if (cls == null) continue;
-            for (String mn : new String[]{
-                    "getLeftListenTimeV2", "getLeftTimeFromSp", "getListenTime",
-                    "getLeftListenTimeWithDefault", "getInterruptLeftListenTime"}) {
-                try {
-                    XposedHelpers.findAndHookMethod(cls, mn, new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) {
-                            Object old = param.getResult();
-                            param.setResult(Long.valueOf(FAKE_LEFT_LISTEN_MS));
-                            if (loggedListenGate.add("api:" + param.method.getName())) {
-                                XposedBridge.log("[" + TAG + "] ⏱ " + param.method.getDeclaringClass().getName()
-                                        + "#" + param.method.getName() + "(): " + old + " -> " + FAKE_LEFT_LISTEN_MS);
-                            }
-                        }
-                    });
-                } catch (Throwable ignored) {}
-            }
-        }
-        XposedBridge.log("[" + TAG + "] ✅ AdApi 剩余时长入口伪装已处理");
-    }
-
-    /** v1.9.29：把 ListenTimeAdFreeInfo 的特权字段补成「有全天畅听特权」 */
-    private void forceAdFreeInfo(Object obj, String src) {
-        if (obj == null) return;
-        trySetField(obj, "hasPrivilege", Boolean.TRUE);
-        trySetField(obj, "credible", Boolean.TRUE);
-        trySetField(obj, "autoUnlock", Boolean.TRUE);
-        trySetField(obj, "hasRewardDuration", 86400000L);
-        trySetField(obj, "adUnlockTimes4AdFreePrivilege", 1L);
-        if (loggedListenGate.add("info:" + src)) {
-            XposedBridge.log("[" + TAG + "] 🎧 已补全天畅听特权: " + src + " (" + obj.getClass().getName() + ")");
-        }
-    }
-
-    /** v1.9.25：判断是否金币播报/语音广告音频（服务端下发的 .aac） */
-    private boolean isVoiceAdUrl(String u) {
-        if (u == null) return false;
-        String low = u.toLowerCase();
-        return low.contains("warningtone") || low.contains("/novel-tts/")
-                || low.contains("goldcoin_credited");
-    }
-
-    /**
-     * v1.9.24：章节结束「语音广告」拦截。
-     *
-     * 取证：
-     *  - 听书贴片声广告由 `com.dragon.read.reader.speech.ad.AudioAdManager` 调度，
-     *    通过 `interceptStartPlay()` 让正文播放先“让路”，再播广告音频；
-     *  - 另有 TTS 播报型广告。
-     * 处理：
-     *  ① `interceptStartPlay()` 恒返回 false —— 不再为广告暂停正文；
-     *  ② 静音 TTS 并记录文案（正文为真人音频，TTS 只用于播报/广告）；
-     *  ③ 记录 MediaPlayer 的广告/短音频数据源，便于下次定位（不拦截）。
-     * 说明：只做"不让路 + TTS 静音"，不动 AudioPlayManager 状态机，避免正常播放被搞挂。
-     */
-    private void hookAudioAdManager() {
-        for (String cn : new String[]{
-                "com.dragon.read.reader.speech.ad.AudioAdManager",
-                "com.dragon.read.reader.speech.ad.kmp.v2.AudioAdManager"}) {
-            try {
-                Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
-                if (cls == null) continue;
-                XposedHelpers.findAndHookMethod(cls, "interceptStartPlay", new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam param) {
-                        try { param.setResult(Boolean.FALSE); } catch (Throwable ignored) {}
-                    }
-                });
-                XposedBridge.log("[" + TAG + "] ✅ 语音广告让路已禁用: " + cn);
-            } catch (Throwable t) {
-                XposedBridge.log("[" + TAG + "] 语音广告拦截失败(" + cn + "): " + t);
-            }
-        }
-        try {
-            XC_MethodHook ttsHook = new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    try {
-                        CharSequence cs = (param.args.length > 0 && param.args[0] instanceof CharSequence)
-                                ? (CharSequence) param.args[0] : null;
-                        if (cs != null && cs.length() > 0) {
-                            XposedBridge.log("[" + TAG + "] 🔇 拦截 TTS 播报: " + cs);
-                        }
-                        param.setResult(0);
-                    } catch (Throwable ignored) {}
-                }
-            };
-            XposedHelpers.findAndHookMethod("android.speech.tts.TextToSpeech", appCl, "speak",
-                    CharSequence.class, int.class, android.os.Bundle.class, String.class, ttsHook);
-            XposedHelpers.findAndHookMethod("android.speech.tts.TextToSpeech", appCl, "speak",
-                    CharSequence.class, int.class, java.util.HashMap.class, ttsHook);
-            XposedBridge.log("[" + TAG + "] ✅ TTS 播报已静音");
-        } catch (Throwable t) {
-            XposedBridge.log("[" + TAG + "] TTS 静音挂载失败: " + t);
-        }
-        // v1.9.25：金币播报/语音广告是**服务端下发 .aac**（novel-tts/warningtone_*.aac），
-        // 在 Cronet 请求层直接掐掉下载，比在播放器层拦更彻底。
-        try {
-            Class<?> cronet = XposedHelpers.findClassIfExists("org.chromium.net.CronetEngine", appCl);
-            if (cronet != null) {
-                XposedBridge.hookAllMethods(cronet, "newUrlRequestBuilder", new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam param) {
-                        try {
-                            if (param.args == null || param.args.length == 0) return;
-                            Object a0 = param.args[0];
-                            if (!(a0 instanceof String)) return;
-                            String u = (String) a0;
-                            if (isVoiceAdUrl(u)) {
-                                XposedBridge.log("[" + TAG + "] 🚫 拦截语音广告音频请求: " + u);
-                                param.args[0] = "http://127.0.0.1/fanqie-blocked";
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                });
-                XposedBridge.log("[" + TAG + "] ✅ 语音广告音频请求拦截已启用 (Cronet)");
-            }
-        } catch (Throwable t) {
-            XposedBridge.log("[" + TAG + "] Cronet 语音广告拦截失败: " + t);
-        }
-        try {
-            XposedBridge.hookAllMethods(android.media.MediaPlayer.class, "setDataSource", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam param) {
-                    try {
-                        if (param.args == null || param.args.length == 0) return;
-                        Object a0 = param.args[0];
-                        if (!(a0 instanceof String)) return;
-                        String u = (String) a0;
-                        String low = u.toLowerCase();
-                        if (low.contains("ad") || low.contains("promo") || low.endsWith(".mp3")
-                                || low.endsWith(".m4a") || low.endsWith(".aac")) {
-                            XposedBridge.log("[" + TAG + "] 🎵 MediaPlayer 数据源: " + u);
-                        }
-                    } catch (Throwable ignored) {}
-                }
-            });
-        } catch (Throwable ignored) {}
-    }
-
-    /**
-     * v1.9.24：首页「推荐悬浮窗 / 推荐插屏」源头拦截（双11 等运营浮窗）。
-     *
-     * 取证：classes2.dex 的 com.dragon.read.pages.main.p1（MainDataHelper）
-     *   f(MainFragmentActivity, MessageType) 分派 TOAST_GOLD / TOAST_CASH /
-     *   TOAST_OPERATION 与 BOOK_SNAPSHOT，日志前缀「推荐悬浮窗 --」「推荐插屏 --」。
-     *   这就是运营活动浮窗（双11 促销）的入口：文案、落地页 URL 全部由服务端下发，
-     *   本地没有固定关键词可抓，所以必须在入口跳过。
-     * 处理：只短路这 4 类文案性推广消息，其它 MessageType 原样放行。
-     */
-    private void hookMainRecommendFloat() {
-        if (mainFloatHooked) return;
-        mainFloatHooked = true;
-        try {
-            Class<?> cls = XposedHelpers.findClassIfExists("com.dragon.read.pages.main.p1", appCl);
-            if (cls == null) {
-                XposedBridge.log("[" + TAG + "] 首页推荐浮窗: p1 未找到，跳过");
-                return;
-            }
-            XposedBridge.hookAllMethods(cls, "f", new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam param) {
-                    try {
-                        Object mt = param.args.length > 1 ? param.args[1] : null;
-                        String name = mt == null ? "" : mt.toString();
-                        if (name.startsWith("TOAST_") || "BOOK_SNAPSHOT".equals(name)) {
-                            param.setResult(null);
-                            XposedBridge.log("[" + TAG + "] 🚫 拦截首页推荐浮窗/插屏: " + name);
-                        }
-                    } catch (Throwable ignored) {}
-                }
-            });
-            XposedBridge.log("[" + TAG + "] ✅ 首页推荐浮窗拦截已启用 (p1.f)");
-        } catch (Throwable t) {
-            XposedBridge.log("[" + TAG + "] 首页推荐浮窗拦截失败: " + t);
-        }
-    }
-
-    /**
-     * v1.9.24：窗口入场后多点扫描并移除促销悬浮窗。
-     * 抽出来是为了在 700/1600/3200ms 三个时间点复用（Lynx 异步渲染）。
-     */
-    private void scanAndRemovePromoWindow(final Object wmgObj, final View root) {
-        try {
-            String hit = findPromoTextIn(root, 0);
-            if (hit == null) return;
-            boolean removed = false;
-            try {
-                java.lang.reflect.Method rm = wmgObj.getClass().getMethod("removeViewImmediate", View.class);
-                rm.setAccessible(true);
-                rm.invoke(wmgObj, root);
-                removed = true;
-            } catch (Throwable t1) {
-                try {
-                    java.lang.reflect.Method rm2 = wmgObj.getClass().getMethod("removeView", View.class);
-                    rm2.setAccessible(true);
-                    rm2.invoke(wmgObj, root);
-                    removed = true;
-                } catch (Throwable ignored) {}
-            }
-            XposedBridge.log("[" + TAG + "] 已" + (removed ? "移除" : "识别到(移除失败)")
-                    + "促销悬浮窗(内容:'" + hit + "', view=" + root.getClass().getName() + ")");
-        } catch (Throwable ignored) {}
-    }
-
-    /**
-     * v1.9.22 兜底网：不是所有促销浮层都是 Dialog —— 有些是直接往
-     * WindowManagerGlobal 里 addView 的独立窗口（Lynx popup）。
-     * 这里在窗口加入时扫描一次，命中促销文案就整窗移除。
-     * 只处理浮动类型窗口（type=2/panel/attachedDialog/overlay），
-     * **绝不碰 activity 自身窗口（type=1）**。
-     */
-    private void hookFloatingPromoWindows() {
-        if (floatingPromoHooked) return;
-        try {
-            Class<?> wmg = XposedHelpers.findClassIfExists("android.view.WindowManagerGlobal", appCl);
-            if (wmg == null) {
-                XposedBridge.log("[" + TAG + "] 悬浮窗兜底：WindowManagerGlobal 未找到");
-                return;
-            }
-            XposedBridge.hookAllMethods(wmg, "addView", new XC_MethodHook() {
-                @Override protected void afterHookedMethod(MethodHookParam param) {
-                    try {
-                        if (param.args == null || param.args.length < 2) return;
-                        if (!(param.args[0] instanceof View)) return;
-                        final View root = (View) param.args[0];
-                        if (!(param.args[1] instanceof android.view.WindowManager.LayoutParams)) return;
-                        int ty = ((android.view.WindowManager.LayoutParams) param.args[1]).type;
-                        boolean floating = (ty == android.view.WindowManager.LayoutParams.TYPE_APPLICATION)
-                                || (ty == android.view.WindowManager.LayoutParams.TYPE_APPLICATION_PANEL)
-                                || (ty == android.view.WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG)
-                                || (ty == android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY);
-                        if (!floating) return;
-                        final Object wmgObj = param.thisObject;
-                        // v1.9.24：Lynx 弹层是异步渲染的，700ms 常常还没出文案；改为三点补扫。
-                        for (long delay : new long[]{700L, 1600L, 3200L}) {
-                            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-                                @Override public void run() {
-                                    scanAndRemovePromoWindow(wmgObj, root);
-                                }
-                            }, delay);
-                        }
-                    } catch (Throwable ignored) {}
-                }
-            });
-            floatingPromoHooked = true;
-            XposedBridge.log("[" + TAG + "] ✅ 悬浮窗促销文案兜底已启用 (WindowManagerGlobal.addView)");
-        } catch (Throwable t) {
-            XposedBridge.log("[" + TAG + "] 悬浮窗兜底启用失败: " + t);
-        }
-    }
-
-    /**
-     * 注：这里**故意不做尺寸护栏**。
-     * 实测那个促销弹层的窗口 decor 是**整屏 1080x2400 的透明壳**（真正的内容只有中间
-     * 886x1410），任何「decor 小于屏幕才算弹窗」的判定都会把它当成整页而跳过。
-     * 因此护栏改为**文案特异性**：PROMO_POPUP_PATTERNS 里的（仅限当前设备 / 限时有效 /
-     * 不自动续费 / 开通7天…）都只会出现在服务端下发的促销浮层上；
-     * 用户主动打开的会员开通页是 Activity 而不是 Dialog，本来就不会走到这里。
-     */
 
     private String findBadText(View v, int depth) {
         if (v == null || depth > 12) return null;
