@@ -337,6 +337,7 @@ public class MainHook implements IXposedHookLoadPackage {
         hookVoiceCastBlocker();          // v1.9.23 新增：屏蔽「金币已到账…」语音播报广告
         hookAudioAdManager();            // v1.9.24 新增：章节结束语音广告（AudioAdManager/TTS）
         hookPlayerUrlBlocker();          // v1.9.26 新增：播放器数据源兜底（warningtone/novel-tts 音频）
+        hookListenTimeGate();            // v1.9.29 新增：畅听时长/全天畅听特权伪装（点听书不再被「时长已用完」拦停）
         scheduleAdSignalRetry();
         scheduleMineTreeDump();          // v1.9.21 诊断：抓「我的」页视图树
     }
@@ -450,10 +451,15 @@ public class MainHook implements IXposedHookLoadPackage {
     /** "我的"页面广告/资产入口关键词（允许长文案，覆盖 VIP 横幅） */
     private boolean isMinePageAdText(String t) {
         if (t == null) return false;
+        // 增强：检测更广泛的权益/时长相关文案，防止漏网
         if (t.contains("尊享免广告") || t.contains("无限下载") || t.contains("多种权益")) return true;
         if (t.contains("¥14开通") || t.contains("VIP")) return true;
+        // 增强检测：剩余时长、播放时长、畅听状态相关文案
+        if (t.contains("剩余时长") || t.contains("播放时长") || t.contains("畅听")
+                || t.contains("时长已用") || t.contains("时长过期")
+                || t.contains("继续畅听") || t.contains("时长剩余")) return true;
         if (t.contains("我的资产") || t.contains("金币余额") || t.contains("现金余额")
-                || t.contains("剩余时长") || t.contains("提现")) return true;
+                || t.contains("提现")) return true;
         return false;
     }
 
@@ -2563,7 +2569,10 @@ public class MainHook implements IXposedHookLoadPackage {
         final String[] adViews = {
                 "com.dragon.read.music.player.block.common.adunlock.MusicAdUnlockTimeView",
                 "com.dragon.read.admodule.adfm.unlocktime.AdUnlockTimeFloatingView",
-                "com.dragon.read.admodule.adfm.unlocktime.entranceview.h"
+                "com.dragon.read.admodule.adfm.unlocktime.entranceview.h",
+                // v1.9.29: 全天畅听计时相关 View
+                "com.dragon.read.admodule.adfm.unlocktime.wholeday.u0",
+                "com.dragon.read.admodule.adfm.unlocktime.wholeday.kmp.v2.g0"
         };
         for (final String vn : adViews) {
             try {
@@ -3654,6 +3663,194 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             });
         } catch (Throwable ignored) {}
+    }
+
+    /** v1.9.29 已打过日志的时长/特权拦截点（只打一次，避免刷屏） */
+    private final Set<String> loggedListenGate = new HashSet<>();
+
+    /**
+     * v1.9.29：畅听时长 / 全天畅听特权伪装。
+     *
+     * <p>现象（6.7.4.32 / 674 实测）：剩余时长归零后点「听书」，App 会
+     * ① 语音播报「您的畅听时长已用完，请播放广告」；
+     * ② 弹出 {@code com.dragon.read.admodule.adfm.unlocktime.wholeday.AdUnlockTimeDialogMix}
+     *    （「看1个小视频，可畅听一整天」）；
+     * ③ 播放器停在 PAUSED。</p>
+     *
+     * <p>取证（classes16.dex）：全天畅听状态由 {@code ...unlocktime.wholeday.u0}
+     * （日志 tag {@code ListenWholeDayManager}，KMP 版为 {@code ...wholeday.kmp.v2.g0}）维护，
+     * 它的 {@code C()} 读 {@code ListenTimeAdFreeInfo.hasPrivilege}；
+     * 特权过期时由 {@code ...reader.speech.ad.listen.strategy.*} 的 {@code Q(onPrivilegeExpire)} 回调
+     * 弹窗、暂停并播语音。</p>
+     *
+     * <p>处理：① 全天畅听状态恒为 true；② 网络模型 {@code ListenTimeAdFreeInfo} 构造/更新时
+     * 把 hasPrivilege/credible 补成 true；③ 把 onPrivilegeExpire 回调整段吞掉（不弹窗/不暂停/不播报），
+     * 播放器不再因为时长归零被拦。</p>
+     */
+    private void hookListenTimeGate() {
+        // ① 全天畅听状态管理器：C() 恒 true（isListenWholeDay）
+        for (String cn : new String[]{
+                "com.dragon.read.admodule.adfm.unlocktime.wholeday.u0",
+                "com.dragon.read.admodule.adfm.unlocktime.wholeday.kmp.v2.g0"}) {
+            try {
+                Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
+                if (cls == null) continue;
+                XposedHelpers.findAndHookMethod(cls, "C", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            Object old = param.getResult();
+                            param.setResult(Boolean.TRUE);
+                            if (!Boolean.TRUE.equals(old)
+                                    && loggedListenGate.add("C:" + param.method.getDeclaringClass().getName())) {
+                                XposedBridge.log("[" + TAG + "] 🎧 全天畅听已伪装为 true（原值 false）: "
+                                        + param.method.getDeclaringClass().getName());
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+                // l() 返回当前 ListenTimeAdFreeInfo，N() 是服务端状态回写
+                XposedHelpers.findAndHookMethod(cls, "l", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        forceAdFreeInfo(param.getResult(), "l()");
+                    }
+                });
+                XposedBridge.hookAllMethods(cls, "N", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.args != null && param.args.length > 1) {
+                                forceAdFreeInfo(param.args[1], "N()");
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+                XposedBridge.log("[" + TAG + "] ✅ 全天畅听特权伪装已挂载: " + cn);
+            } catch (Throwable t) {
+                XposedBridge.log("[" + TAG + "] 全天畅听伪装失败(" + cn + "): " + t);
+            }
+        }
+
+        // ② 网络模型实例构造即补丁，避免 App 缓存到 hasPrivilege=false
+        try {
+            Class<?> info = XposedHelpers.findClassIfExists("com.xs.fm.rpc.model.ListenTimeAdFreeInfo", appCl);
+            if (info != null) {
+                XposedBridge.hookAllConstructors(info, new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        forceAdFreeInfo(param.thisObject, "<init>");
+                    }
+                });
+                XposedBridge.log("[" + TAG + "] ✅ ListenTimeAdFreeInfo 构造即补特权");
+            }
+        } catch (Throwable ignored) {}
+
+        // ②.5 剩余时长入口（倒计时/播放门槛）统一伪装
+        hookListenTimeProviders();
+
+        // ③ 特权过期回调：不弹「领取时长」、不暂停正文、不播提示语音
+        for (String cn : new String[]{
+                "com.dragon.read.reader.speech.ad.listen.strategy.h",
+                "com.dragon.read.reader.speech.ad.listen.strategy.i",
+                "com.dragon.read.reader.speech.ad.listen.strategy.l",
+                "com.dragon.read.reader.speech.ad.listen.strategy.kmp.v2.h",
+                "com.dragon.read.reader.speech.ad.listen.strategy.kmp.v2.l",
+                "com.dragon.read.reader.speech.ad.listen.strategy.kmp.v2.p"}) {
+            try {
+                Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
+                if (cls == null) continue;
+                XposedBridge.hookAllMethods(cls, "Q", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            if (param.args != null && param.args.length > 0) return;  // 只吞无参重载
+                            param.setResult(null);
+                            String name = param.method.getDeclaringClass().getName();
+                            if (loggedListenGate.add("Q:" + name)) {
+                                XposedBridge.log("[" + TAG + "] 🔇 已拦截特权过期回调(onPrivilegeExpire): " + name);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                });
+            } catch (Throwable t) {
+                XposedBridge.log("[" + TAG + "] 特权过期回调拦截失败(" + cn + "): " + t);
+            }
+        }
+    }
+
+    /**
+     * v1.9.29：剩余畅听时长（倒计时）伪装。
+     *
+     * <p>播放页那个「00时00分00秒｜看1个视频两天畅听」的胶囊就是这里的值：
+     * {@code AdApi.getLeftListenTimeV2()} → 直接读 {@code ListenTimeManager.f()}（静态 long，ms），
+     * 另有 {@code getListenTime()/getLeftTimeFromSp()/getLeftListenTimeWithDefault()} 几个入口。
+     * 反编译 classes5.dex 确认 {@code getLeftListenTimeV2()} 的逻辑是：
+     * {@code if (u0.C()) return Long.MAX_VALUE; if (isVip()) return Long.MAX_VALUE; ... else return 0;}
+     * 所以时长归零后，只要这里返回正数，播放器就不会再走「时长已用完」分支。</p>
+     *
+     * 返回 24 小时（ms），足够听完很多章，且不会像 MAX_VALUE 那样在
+     * 「已达上限」/格式化（超过 99 小时显示 99）的地方出现奇怪文案。
+     */
+    private static final long FAKE_LEFT_LISTEN_MS = 24L * 60L * 60L * 1000L;
+
+    private void hookListenTimeProviders() {
+        // ① 剩余时长数据源：ListenTimeManager.f()（普通版 + KMP 版）
+        for (String cn : new String[]{
+                "com.dragon.read.admodule.patch.filter.ListenTimeManager",
+                "com.dragon.read.admodule.patch.filter.kmp.v2.ListenTimeManager"}) {
+            try {
+                Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
+                if (cls == null) continue;
+                XposedHelpers.findAndHookMethod(cls, "f", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        Object old = param.getResult();
+                        param.setResult(FAKE_LEFT_LISTEN_MS);
+                        if (loggedListenGate.add("f:" + param.method.getDeclaringClass().getName())) {
+                            XposedBridge.log("[" + TAG + "] ⏱ 剩余畅听时长已伪装: " + old + " -> "
+                                    + FAKE_LEFT_LISTEN_MS + " ms ("
+                                    + param.method.getDeclaringClass().getName() + ")");
+                        }
+                    }
+                });
+                XposedBridge.log("[" + TAG + "] ✅ 剩余畅听时长伪装已挂载: " + cn);
+            } catch (Throwable t) {
+                XposedBridge.log("[" + TAG + "] 剩余时长伪装失败(" + cn + "): " + t);
+            }
+        }
+        // ② AdApi 的几个读取入口（AdImpl 与 KMP 版）
+        for (String cn : new String[]{
+                "com.xs.fm.ad.impl.AdImpl",
+                "com.xs.fm.ad.impl.kmp.v2.AdImpl",
+                "com.xs.fm.ad.impl.kmp.v2.k0"}) {
+            Class<?> cls = XposedHelpers.findClassIfExists(cn, appCl);
+            if (cls == null) continue;
+            for (String mn : new String[]{
+                    "getLeftListenTimeV2", "getLeftTimeFromSp", "getListenTime",
+                    "getLeftListenTimeWithDefault", "getInterruptLeftListenTime"}) {
+                try {
+                    XposedHelpers.findAndHookMethod(cls, mn, new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            Object old = param.getResult();
+                            param.setResult(Long.valueOf(FAKE_LEFT_LISTEN_MS));
+                            if (loggedListenGate.add("api:" + param.method.getName())) {
+                                XposedBridge.log("[" + TAG + "] ⏱ " + param.method.getDeclaringClass().getName()
+                                        + "#" + param.method.getName() + "(): " + old + " -> " + FAKE_LEFT_LISTEN_MS);
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {}
+            }
+        }
+        XposedBridge.log("[" + TAG + "] ✅ AdApi 剩余时长入口伪装已处理");
+    }
+
+    /** v1.9.29：把 ListenTimeAdFreeInfo 的特权字段补成「有全天畅听特权」 */
+    private void forceAdFreeInfo(Object obj, String src) {
+        if (obj == null) return;
+        trySetField(obj, "hasPrivilege", Boolean.TRUE);
+        trySetField(obj, "credible", Boolean.TRUE);
+        trySetField(obj, "autoUnlock", Boolean.TRUE);
+        trySetField(obj, "hasRewardDuration", 86400000L);
+        trySetField(obj, "adUnlockTimes4AdFreePrivilege", 1L);
+        if (loggedListenGate.add("info:" + src)) {
+            XposedBridge.log("[" + TAG + "] 🎧 已补全天畅听特权: " + src + " (" + obj.getClass().getName() + ")");
+        }
     }
 
     /** v1.9.25：判断是否金币播报/语音广告音频（服务端下发的 .aac） */
